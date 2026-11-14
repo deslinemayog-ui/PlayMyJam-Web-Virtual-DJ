@@ -1,0 +1,675 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Play, Pause, SkipForward, SkipBack, Music, Disc, Zap, Waves, RotateCcw, Repeat, Volume2, FastForward } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import DiscoLights from './DiscoLights';
+import { useAudioLogic } from '@/hooks/useAudioLogic';
+import WaveformDisplay from './WaveformDisplay';
+import HotCuePads, { HOT_CUE_COLORS } from './HotCuePads';
+
+interface DeckAProps {
+  deckA: any;
+  bpmA: number;
+  deckAEQ: any;
+  deckAEffects: any;
+  toggleDeckA: () => void;
+  updateDeckAVolume: (volume: number) => void;
+  updateDeckAEQ: (eq: any) => void;
+  toggleDeckAReverb: () => void;
+  toggleDeckAEcho: () => void;
+  // New advanced features
+  setLoopIn?: (position: number) => void;
+  setLoopOut?: (position: number) => void;
+  toggleLoop?: () => void;
+  setCuePoint?: (position: number) => void;
+  jumpToCue?: () => void;
+  beatJump?: (beats: number) => void;
+  toggleSlipMode?: () => void;
+  // Disco lights
+  discoLightsEnabled?: boolean;
+  onLoadTrack?: (song: any) => void;
+}
+
+const DeckA: React.FC<DeckAProps> = ({
+  deckA,
+  bpmA,
+  deckAEQ,
+  deckAEffects,
+  toggleDeckA,
+  updateDeckAVolume,
+  updateDeckAEQ,
+  toggleDeckAReverb,
+  toggleDeckAEcho,
+  setLoopIn,
+  setLoopOut,
+  toggleLoop,
+  setCuePoint,
+  jumpToCue,
+  beatJump,
+  toggleSlipMode,
+  discoLightsEnabled = true,
+  onLoadTrack,
+}) => {
+  // Local state for advanced features
+  const [loopIn, setLoopInState] = useState<number | null>(null);
+  const [loopOut, setLoopOutState] = useState<number | null>(null);
+  const [isLooping, setIsLooping] = useState(false);
+  const [cuePoint, setCuePointState] = useState<number | null>(null);
+  const [isSlipMode, setIsSlipMode] = useState(false);
+  const [hotCues, setHotCues] = useState<(number | null)[]>(Array(8).fill(null));
+  const [visualizerData, setVisualizerData] = useState<number[]>([]);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const animationRef = useRef<number>();
+  const {clearCurrentBid} = useAudioLogic();
+  // Vinyl scratching state
+  const [isScratching, setIsScratching] = useState(false);
+  const [lastMouseY, setLastMouseY] = useState(0);
+  const [originalPlaybackRate, setOriginalPlaybackRate] = useState(1);
+  const vinylRef = useRef<HTMLDivElement>(null);
+
+
+
+  useEffect(() => {
+    if((deckA?.position > 43) && (deckA?.position < 46) ){
+      clearCurrentBid(deckA?.currentTrack)
+    }
+  },[deckA?.position])
+  useEffect(() => {
+    if (deckA.isPlaying) {
+      const generateVisualizerData = () => {
+        const bars = 32; // Number of frequency bars around the vinyl
+        const data = Array.from({ length: bars }, (_, i) => {
+          // Simulate frequency data with some randomness and bass emphasis
+          const bassBoost = i < 8 ? 1.5 : 1;
+          const midBoost = i >= 8 && i < 16 ? 1.2 : 1;
+          const trebleBoost = i >= 24 ? 1.3 : 1;
+
+          return (Math.random() * 0.8 + 0.2) * bassBoost * midBoost * trebleBoost;
+        });
+        setVisualizerData(data);
+
+        animationRef.current = requestAnimationFrame(generateVisualizerData);
+      };
+
+      generateVisualizerData();
+    } else {
+      // Stop animation when not playing
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      // Fade out visualizer
+      setVisualizerData(prev => prev.map(val => val * 0.9));
+    }
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+    };
+  }, [deckA.isPlaying]);
+
+  // Draw circular music visualizer around vinyl
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const { width, height } = canvas;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    const radius = Math.min(width, height) / 2 - 20;
+
+    ctx.clearRect(0, 0, width, height);
+
+    if (visualizerData.length > 0) {
+      const barCount = visualizerData.length;
+      const angleStep = (Math.PI * 2) / barCount;
+
+      visualizerData.forEach((amplitude, index) => {
+        const angle = index * angleStep - Math.PI / 2; // Start from top
+        const barHeight = amplitude * 30; // Scale the bar height
+
+        // Calculate positions
+        const innerRadius = radius - 5;
+        const outerRadius = innerRadius + barHeight;
+
+        const x1 = centerX + Math.cos(angle) * innerRadius;
+        const y1 = centerY + Math.sin(angle) * innerRadius;
+        const x2 = centerX + Math.cos(angle) * outerRadius;
+        const y2 = centerY + Math.sin(angle) * outerRadius;
+
+        // Create gradient for each bar
+        const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
+
+        // Color based on frequency (bass = red, mid = purple, treble = blue)
+        if (index < 8) {
+          // Bass frequencies - red to purple
+          gradient.addColorStop(0, '#ef4444');
+          gradient.addColorStop(1, '#a855f7');
+        } else if (index < 16) {
+          // Low-mid frequencies - purple
+          gradient.addColorStop(0, '#a855f7');
+          gradient.addColorStop(1, '#c084fc');
+        } else if (index < 24) {
+          // High-mid frequencies - purple to blue
+          gradient.addColorStop(0, '#a855f7');
+          gradient.addColorStop(1, '#3b82f6');
+        } else {
+          // Treble frequencies - blue to cyan
+          gradient.addColorStop(0, '#3b82f6');
+          gradient.addColorStop(1, '#06b6d4');
+        }
+
+        // Draw the bar
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      });
+    }
+
+    // Draw loop and cue indicators as small dots around the circle
+    const indicatorRadius = radius + 35;
+
+    if (loopIn !== null && deckA.duration > 0) {
+      const progress = loopIn / deckA.duration;
+      const angle = progress * Math.PI * 2 - Math.PI / 2;
+      const x = centerX + Math.cos(angle) * indicatorRadius;
+      const y = centerY + Math.sin(angle) * indicatorRadius;
+
+      ctx.fillStyle = '#10b981';
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (loopOut !== null && deckA.duration > 0) {
+      const progress = loopOut / deckA.duration;
+      const angle = progress * Math.PI * 2 - Math.PI / 2;
+      const x = centerX + Math.cos(angle) * indicatorRadius;
+      const y = centerY + Math.sin(angle) * indicatorRadius;
+
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    if (cuePoint !== null && deckA.duration > 0) {
+      const progress = cuePoint / deckA.duration;
+      const angle = progress * Math.PI * 2 - Math.PI / 2;
+      const x = centerX + Math.cos(angle) * indicatorRadius;
+      const y = centerY + Math.sin(angle) * indicatorRadius;
+
+      ctx.fillStyle = '#f59e0b';
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Playhead indicator removed - was annoying
+  }, [visualizerData, deckA.position, deckA.duration, loopIn, loopOut, cuePoint]);
+
+  // Handler functions
+  const handleSetLoopIn = () => {
+    const currentPosition = deckA.position || 0;
+    setLoopInState(currentPosition);
+    setLoopIn?.(currentPosition);
+  };
+
+  const handleSetLoopOut = () => {
+    const currentPosition = deckA.position || 0;
+    setLoopOutState(currentPosition);
+    setLoopOut?.(currentPosition);
+  };
+
+  const handleToggleLoop = () => {
+    setIsLooping(!isLooping);
+    toggleLoop?.();
+  };
+
+  const handleSetCue = () => {
+    const currentPosition = deckA.position || 0;
+    setCuePointState(currentPosition);
+    setCuePoint?.(currentPosition);
+  };
+
+  const handleJumpToCue = () => {
+    if (cuePoint !== null) {
+      jumpToCue?.();
+    }
+  };
+
+  const handleBeatJump = (beats: number) => {
+    beatJump?.(beats);
+  };
+
+  const handleToggleSlip = () => {
+    setIsSlipMode(!isSlipMode);
+    toggleSlipMode?.();
+  };
+
+  // Vinyl scratching handlers
+  const handleVinylMouseDown = (e: React.MouseEvent) => {
+    if (!deckA.currentTrack) return;
+
+    console.log('🎵 Vinyl scratch started');
+    setIsScratching(true);
+    setLastMouseY(e.clientY);
+
+    // Pause the track using the toggle function
+    if (deckA.isPlaying) {
+      setOriginalPlaybackRate(1);
+      toggleDeckA?.(); // This will pause the track
+    }
+
+    // Prevent text selection
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleVinylMouseMove = (e: React.MouseEvent) => {
+    if (!isScratching || !deckA.currentTrack) return;
+
+    const deltaY = e.clientY - lastMouseY;
+
+    // Play scratch sound effect based on movement
+    if (Math.abs(deltaY) > 5) {
+      console.log('🎵 Triggering scratch sound effect');
+      // Trigger scratch sound effect
+      const scratchEvent = new CustomEvent('playScratchEffect');
+      window.dispatchEvent(scratchEvent);
+    }
+
+    setLastMouseY(e.clientY);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleVinylMouseUp = () => {
+    if (!isScratching) return;
+
+    console.log('🎵 Vinyl scratch ended');
+    setIsScratching(false);
+
+    // Resume playback if it was playing before scratching
+    if (originalPlaybackRate > 0 && !deckA.isPlaying) {
+      toggleDeckA?.(); // This will resume the track
+    }
+  };
+
+  // Add global mouse up listener for when mouse leaves vinyl area
+  React.useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (isScratching) {
+        handleVinylMouseUp();
+      }
+    };
+
+    document.addEventListener('mouseup', handleGlobalMouseUp);
+    document.addEventListener('mouseleave', handleGlobalMouseUp);
+
+    return () => {
+      document.removeEventListener('mouseup', handleGlobalMouseUp);
+      document.removeEventListener('mouseleave', handleGlobalMouseUp);
+    };
+  }, [isScratching, deckA.isPlaying, originalPlaybackRate]);
+
+  // Drag and Drop Handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const songData = e.dataTransfer.getData('application/json');
+    if (songData) {
+      try {
+        const song = JSON.parse(songData);
+        onLoadTrack?.(song);
+      } catch (err) {}
+    } else if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file.type.startsWith('audio/')) {
+        const url = URL.createObjectURL(file);
+        const song = {
+          id: `dropped-${Date.now()}`,
+          title: file.name.replace(/\.[^/.]+$/, ""),
+          artist: 'Dropped File',
+          albumArt: '',
+          url: url,
+          audioUrl: url,
+          duration: 0,
+          action: 'stop',
+          isPlaying: false,
+          isSuggested: false,
+          isLocal: true,
+        };
+        onLoadTrack?.(song);
+      }
+    }
+  };
+
+  return (
+    <DiscoLights isPlaying={deckA.isPlaying} deckId="A" enabled={discoLightsEnabled}>
+      <div 
+        className="glass-card p-4 animate-fade-in-up font-montserrat-light transition-colors hover:border-purple-500/50 border border-transparent"
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+      <div className="flex items-center gap-3 mb-8">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center">
+          <Disc className="w-4 h-4 text-white animate-spin" style={{animationDuration: deckA.isPlaying ? '2s' : '0s'}} />
+        </div>
+        <h2 className="text-xl font-montserrat-bold text-white">Deck A</h2>
+      </div>
+
+      {/* Vinyl with Music Visualizer */}
+      <div className="relative mb-8 flex items-center justify-center">
+        {/* Music Visualizer Canvas - positioned behind vinyl */}
+        <canvas
+          ref={canvasRef}
+          width={180}
+          height={180}
+          className="absolute w-45 h-45 pointer-events-none"
+          style={{ zIndex: 1 }}
+        />
+
+        {/* Vinyl Simulation - positioned on top of visualizer with scratching */}
+        <div
+          ref={vinylRef}
+          className={`relative w-32 h-32 bg-gradient-to-br from-gray-800 to-black rounded-full border-2 ${
+            isScratching ? 'border-red-500' : 'border-purple-400/30'
+          } flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors`}
+          style={{ zIndex: 2 }}
+          onMouseDown={handleVinylMouseDown}
+          onMouseMove={handleVinylMouseMove}
+          onMouseUp={handleVinylMouseUp}
+        >
+          <div className={`w-28 h-28 bg-gradient-to-br from-purple-600 to-purple-800 rounded-full flex items-center justify-center p-2 ${
+            deckA.isPlaying && !isScratching ? 'animate-spin' : ''
+          }`} style={{animationDuration: '3s'}}>
+            {deckA.currentTrack?.albumArt ? (
+              <img src={deckA.currentTrack.albumArt} alt="Album Art" className="w-full h-full rounded-full object-cover" />
+            ) : (
+              <Music className="w-6 h-6 text-white" />
+            )}
+          </div>
+
+          {/* Scratch indicator */}
+          {isScratching && (
+            <div className="absolute inset-0 rounded-full border-2 border-red-500 animate-pulse" />
+          )}
+        </div>
+      </div>
+
+      {/* Waveform Display */}
+      <div className="mb-3">
+        <WaveformDisplay
+          audioUrl={deckA.currentTrack?.audioUrl || deckA.currentTrack?.url}
+          position={deckA.position || 0}
+          duration={deckA.duration || 0}
+          isPlaying={deckA.isPlaying}
+          color="#a855f7"
+          hotCues={hotCues}
+          hotCueColors={HOT_CUE_COLORS}
+          loopIn={loopIn}
+          loopOut={loopOut}
+          onSeek={(pos) => {
+            // Seek via audio element if accessible
+            const audio = document.querySelector('#deckA-audio') as HTMLAudioElement;
+            if (audio) audio.currentTime = pos;
+          }}
+        />
+      </div>
+
+      {/* Track Info */}
+      <div className="bg-gradient-to-r from-purple-500/20 to-transparent rounded-lg px-3 py-2 mb-3">
+        <p className="text-gray-300 text-xs truncate">
+          {deckA.currentTrack ? `${deckA.currentTrack.artist} - ${deckA.currentTrack.title}` : 'Drop a track or select from library'}
+        </p>
+      </div>
+
+      {/* Hot Cues */}
+      <div className="mb-3">
+        <HotCuePads
+          hotCues={hotCues}
+          currentPosition={deckA.position || 0}
+          isDisabled={!deckA.currentTrack}
+          onSet={(index, pos) => {
+            const updated = [...hotCues];
+            updated[index] = pos;
+            setHotCues(updated);
+          }}
+          onJump={(index) => {
+            const pos = hotCues[index];
+            if (pos == null) return;
+            const audio = document.querySelector('#deckA-audio') as HTMLAudioElement;
+            if (audio) audio.currentTime = pos;
+          }}
+          onClear={(index) => {
+            const updated = [...hotCues];
+            updated[index] = null;
+            setHotCues(updated);
+          }}
+        />
+      </div>
+
+      {/* Deck Controls */}
+      <div className="space-y-3">
+        <div className="flex justify-center gap-2">
+          <Button variant="outline" size="sm" className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
+            <SkipBack className="w-4 h-4" />
+          </Button>
+          <Button
+            onClick={toggleDeckA}
+            className="bg-purple-500 hover:bg-purple-600 text-white px-6"
+            disabled={!deckA.currentTrack || deckA.isLoading}
+          >
+            {deckA.isLoading ? (
+              <div className="w-4 h-4 border border-white border-t-transparent rounded-full animate-spin" />
+            ) : deckA.isPlaying ? (
+              <Pause className="w-4 h-4" />
+            ) : (
+              <Play className="w-4 h-4" />
+            )}
+          </Button>
+          <Button variant="outline" size="sm" className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
+            <SkipForward className="w-4 h-4" />
+          </Button>
+        </div>
+        
+        {/* Volume Control */}
+        <div className="space-y-2">
+          <label className="text-white text-sm">Volume</label>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={deckA.volume}
+            onChange={(e) => updateDeckAVolume(Number(e.target.value))}
+            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple"
+          />
+          <div className="flex justify-between text-xs text-gray-400">
+            <span>0</span>
+            <span>{typeof deckA.volume === 'number' ? deckA.volume : 75}%</span>
+            <span>100</span>
+          </div>
+        </div>
+
+        {/* EQ Controls */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="text-center">
+            <label className="text-white text-xs">High</label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={deckAEQ.high}
+              onChange={(e) => updateDeckAEQ({ ...deckAEQ, high: Number(e.target.value) })}
+              className="w-full h-1 bg-gray-700 rounded slider-purple"
+            />
+          </div>
+          <div className="text-center">
+            <label className="text-white text-xs">Mid</label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={deckAEQ.mid}
+              onChange={(e) => updateDeckAEQ({ ...deckAEQ, mid: Number(e.target.value) })}
+              className="w-full h-1 bg-gray-700 rounded slider-purple"
+            />
+          </div>
+          <div className="text-center">
+            <label className="text-white text-xs">Low</label>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              value={deckAEQ.low}
+              onChange={(e) => updateDeckAEQ({ ...deckAEQ, low: Number(e.target.value) })}
+              className="w-full h-1 bg-gray-700 rounded slider-purple"
+            />
+          </div>
+        </div>
+
+        {/* Effect Buttons */}
+        <div className="grid grid-cols-2 gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+              deckAEffects.reverb > 0 ? 'bg-purple-400 text-white' : ''
+            }`}
+            onClick={toggleDeckAReverb}
+          >
+            <Zap className="w-4 h-4 mr-1" />
+            Reverb
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+              deckAEffects.delay > 0 ? 'bg-purple-400 text-white' : ''
+            }`}
+            onClick={toggleDeckAEcho}
+          >
+            <Waves className="w-4 h-4 mr-1" />
+            Echo
+          </Button>
+        </div>
+
+        {/* Advanced Controls */}
+        <div className="grid grid-cols-4 gap-1 mb-3">
+          {/* Loop Controls */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSetLoopIn}
+            className="border-green-400 text-green-400 hover:bg-green-400 hover:text-white text-xs px-1"
+          >
+            IN
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSetLoopOut}
+            className="border-red-400 text-red-400 hover:bg-red-400 hover:text-white text-xs px-1"
+          >
+            OUT
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleToggleLoop}
+            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1 ${
+              isLooping ? 'bg-purple-400 text-white' : ''
+            }`}
+          >
+            <Repeat className="w-3 h-3" />
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleSetCue}
+            className="border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white text-xs px-1"
+          >
+            <Volume2 className="w-3 h-3" />
+          </Button>
+        </div>
+
+        {/* Beat Jump & Slip Mode */}
+        <div className="grid grid-cols-4 gap-1 mb-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleBeatJump(-4)}
+            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+          >
+            -4
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleBeatJump(-1)}
+            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+          >
+            -1
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleBeatJump(1)}
+            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+          >
+            +1
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => handleBeatJump(4)}
+            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+          >
+            +4
+          </Button>
+        </div>
+
+        {/* Cue & Slip Mode */}
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleJumpToCue}
+            className="border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white"
+            disabled={cuePoint === null}
+          >
+            <RotateCcw className="w-4 h-4 mr-1" />
+            CUE
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleToggleSlip}
+            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+              isSlipMode ? 'bg-purple-400 text-white' : ''
+            }`}
+          >
+            <FastForward className="w-4 h-4 mr-1" />
+            SLIP
+          </Button>
+        </div>
+
+
+      </div>
+    </div>
+    </DiscoLights>
+  );
+};
+
+export default DeckA;
