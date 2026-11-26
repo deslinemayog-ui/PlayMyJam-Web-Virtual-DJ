@@ -1,0 +1,10 @@
+cd play && gcloud run deploy play-server --source . --region europe-west1 --allow-unauthenticated
+
+npm run electron:build:mac   # or electron:build:win / electron:release
+
+
+Deployment Summary
+Project: sublime-calling-507411-e0
+Service & Region: play-server (europe-west1)
+Revision: play-server-00004-sr9 (serving 100% of traffic, 1Gi RAM, 300s timeout)
+Live URL: https://play-server-371330410186.europe-west1.run.app

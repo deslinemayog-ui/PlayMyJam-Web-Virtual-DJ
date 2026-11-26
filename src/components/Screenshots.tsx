@@ -4,15 +4,15 @@ import React from 'react';
 const Screenshots = () => {
   const screenshots = [
     {
-      src: "/lovable-uploads/screen1.png",
+      src: "./lovable-uploads/screen1.webp",
       title: "Music Library"
     },
     {
-      src: "/lovable-uploads/screen2.png",
+      src: "./lovable-uploads/screen2.webp",
       title: "DJ Connection"
     },
     {
-      src: "/lovable-uploads/screen3.png",
+      src: "./lovable-uploads/screen3.webp",
       title: "Live DJ Sessions"
     }
   ];
@@ -42,6 +42,8 @@ const Screenshots = () => {
                     <img 
                       src={screenshot.src} 
                       alt={screenshot.title}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-auto rounded-xl transition-transform duration-500 group-hover:scale-105"
                     />
                     <div className="mt-4 text-center">

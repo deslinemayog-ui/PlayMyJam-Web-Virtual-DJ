@@ -4,31 +4,31 @@ import React from 'react';
 const AppPreview = () => {
   const screenshots = [
     {
-      src: "/lovable-uploads/screen1.png",
+      src: "./lovable-uploads/screen1.webp",
       title: "Music Discovery"
     },
     {
-      src: "/lovable-uploads/screen2.png",
+      src: "./lovable-uploads/screen2.webp",
       title: "Social Connect"
     },
     {
-      src: "/lovable-uploads/screen3.png",
+      src: "./lovable-uploads/screen3.webp",
       title: "Live Sessions"
     },
     {
-      src: "/lovable-uploads/screen4.png",
+      src: "./lovable-uploads/screen4.webp",
       title: "DJ Dashboard"
     },
     {
-      src: "/lovable-uploads/screen5.png",
+      src: "./lovable-uploads/screen5.webp",
       title: "Music Player"
     },
     {
-      src: "/lovable-uploads/screen6.png",
+      src: "./lovable-uploads/screen6.webp",
       title: "Profile & Settings"
     },
     {
-      src: "/lovable-uploads/screen7.png",
+      src: "./lovable-uploads/screen7.webp",
       title: "Community Hub"
     }
   ];
@@ -58,6 +58,8 @@ const AppPreview = () => {
                     <img 
                       src={screenshot.src} 
                       alt={screenshot.title}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-auto rounded-xl transition-transform duration-500 group-hover:scale-105"
                     />
                     <div className="mt-4 text-center">

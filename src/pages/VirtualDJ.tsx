@@ -4,7 +4,8 @@ import { useAudioLogic } from '@/hooks/useAudioLogic';
 import { useAutoDJ } from '@/hooks/useAutoDJ';
 import { useTikTokLive } from '@/hooks/useTikTokLive';
 import { useAuth } from '@/contexts/AuthContext';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
+import type { RootState } from '@/store';
 import { resetDeckA, resetDeckB } from '@/store/slices/musicPlayerSlice';
 import type { Song } from '@/Types';
 
@@ -326,27 +327,16 @@ const VirtualDJ = () => {
     playTikTokSongNow,
   ]);
 
-  // Prompt login modal once when visiting DJ page if not authenticated (allow dismissing to use Local/TikTok Studio)
+  // Wait for persisted auth state to rehydrate before prompting login once (allow dismissing to use Local/TikTok Studio)
+  const isPersistedRehydrated = useSelector((state: RootState) => Boolean(state._persist?.rehydrated));
   const promptedLoginRef = useRef(false);
   useEffect(() => {
-      if (!isAuthenticated && !promptedLoginRef.current) {
-        promptedLoginRef.current = true;
-        openLoginModal();
-      }
-    }, [isAuthenticated, openLoginModal]);
-
-  // Improved loading state - only show spinner if actually loading
-  const isActuallyLoading = !deckA?.currentTrack && !deckB?.currentTrack && isLoadingSongs;
-
-  if (isActuallyLoading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-[#222240] via-[#3a3a6a] to-[#222240] flex items-center justify-center">
-        <div className="text-white text-center">
-          <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin mx-auto"></div>
-        </div>
-      </div>
-    );
-  }
+    if (!isPersistedRehydrated) return;
+    if (!isAuthenticated && !promptedLoginRef.current) {
+      promptedLoginRef.current = true;
+      openLoginModal();
+    }
+  }, [isPersistedRehydrated, isAuthenticated, openLoginModal]);
 
   return (
     <>

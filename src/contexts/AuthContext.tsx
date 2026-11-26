@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useMemo, ReactNode } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { setAccountInfo } from '@/store/slices/accountInfo';
-import { loginApi } from '@/api';
 import { PlayMyJamProfile } from '@/Types';
 
 interface AuthState {
@@ -44,6 +43,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       setAuthState(prev => ({ ...prev, isLoading: true, error: null }));
 
       try {
+        const { loginApi } = await import('@/api');
         const response = await loginApi(phoneNumber, password);
         if (response.length > 0) {
           const user = response[0] as PlayMyJamProfile;

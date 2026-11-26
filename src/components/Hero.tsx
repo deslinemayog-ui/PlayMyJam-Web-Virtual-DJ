@@ -22,9 +22,13 @@ const Hero = () => {
             
             <div className="mb-6">
               <img 
-                src="/lovable-uploads/logo.png" 
+                src="./lovable-uploads/logo.webp" 
                 alt="PlayMyJam Logo" 
-                className="h-20 lg:h-24 mx-auto lg:mx-0"
+                width={96}
+                height={96}
+                decoding="async"
+                fetchPriority="high"
+                className="h-20 lg:h-24 w-auto mx-auto lg:mx-0"
               />
             </div>
             
@@ -100,8 +104,12 @@ const Hero = () => {
               <div className="absolute inset-0 bg-gradient-to-r from-purple-600 to-pink-600 rounded-3xl blur-2xl opacity-30 scale-110"></div>
               <div className="relative">
                 <img 
-                  src="/lovable-uploads/screen7.png" 
+                  src="./lovable-uploads/screen7.webp" 
                   alt="PlayMyJam App Preview" 
+                  width={320}
+                  height={656}
+                  decoding="async"
+                  fetchPriority="high"
                   className="w-80 h-auto rounded-3xl shadow-2xl"
                 />
               </div>

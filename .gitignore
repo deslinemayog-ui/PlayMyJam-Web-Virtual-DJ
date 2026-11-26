@@ -28,5 +28,5 @@ dist-electron/
 release/
 public/downloads/
 src/components/virtualDJ/commands.txt
-play/
+play/node_modules
 

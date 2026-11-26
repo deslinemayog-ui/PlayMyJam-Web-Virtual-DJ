@@ -9,7 +9,7 @@ const collections = [
     tagline: 'Unleash your inner predator',
     description: 'The Tiger Edition channels raw power and fearless energy. Crafted for those who command every room they enter. With bold stripes and a heavyweight cut, this is statement dressing at its finest.',
     price: 'From ZAR 999',
-    image: '/lovable-uploads/item1.png',
+    image: './lovable-uploads/item1.webp',
     gradient: 'from-orange-500 via-amber-500 to-yellow-500',
     glow: 'rgba(251,146,60,0.4)',
     gsm: '200 GSM Organic Cotton',
@@ -22,7 +22,7 @@ const collections = [
     tagline: 'Sleek. Sophisticated. Silent.',
     description: 'The Panther Edition embodies quiet luxury. Understated on the surface, extraordinary in detail. For the music lover who lets their presence speak louder than words.',
     price: 'From ZAR 1,299',
-    image: '/lovable-uploads/item2.png',
+    image: './lovable-uploads/item2.webp',
     gradient: 'from-purple-600 via-violet-600 to-indigo-700',
     glow: 'rgba(139,92,246,0.4)',
     gsm: '180 GSM Premium Cotton',
@@ -35,7 +35,7 @@ const collections = [
     tagline: 'Invisible luxury. Undeniable presence.',
     description: 'The Ghost Edition is the apex of the PlayMyJam apparel line. A luxury blend garment with phantom-inspired aesthetics that blur the line between streetwear and high fashion.',
     price: 'From ZAR 2,750',
-    image: '/lovable-uploads/item3.png',
+    image: './lovable-uploads/item3.webp',
     gradient: 'from-slate-500 via-gray-600 to-zinc-700',
     glow: 'rgba(148,163,184,0.4)',
     gsm: '220 GSM Luxury Blend',
@@ -144,6 +144,8 @@ const ApparelShowcase = () => {
                 <img
                   src={active.image}
                   alt={active.name}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-[420px] object-cover transition-transform duration-700 hover:scale-105"
                 />
                 <div className={`absolute inset-0 bg-gradient-to-t ${active.gradient} opacity-20`} />

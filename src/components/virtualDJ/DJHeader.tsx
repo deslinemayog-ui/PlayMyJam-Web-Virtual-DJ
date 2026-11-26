@@ -5,7 +5,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { currencyFormatter } from '@/utils';
 import { Button } from '@/components/ui/button';
 import AutoDJPanel from './AutoDJPanel';
-import playLogo from '/play.png';
+import playLogo from '/play.webp';
 
 interface DJHeaderProps {
   discoLightsEnabled?: boolean;
@@ -75,6 +75,7 @@ const DJHeader: React.FC<DJHeaderProps> = ({
             <img
               src={playLogo}
               alt="PlayMyJam DJ"
+              decoding="async"
               className="h-8 lg:h-10 w-auto"
             />
           </div>

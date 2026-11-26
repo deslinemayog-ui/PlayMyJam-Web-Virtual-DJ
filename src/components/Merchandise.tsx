@@ -9,7 +9,7 @@ const Merchandise = () => {
       name: "Panther Collection",
       description: "Sleek and sophisticated for the refined audiophile",
       price: "ZAR 999",
-      image: "/lovable-uploads/item1.png",
+      image: "./lovable-uploads/item1.webp",
       gsm: "200 GSM Organic Cotton",
       color: "from-purple-600 to-blue-600"
     },
@@ -17,7 +17,7 @@ const Merchandise = () => {
       name: "Panther Collection", 
       description: "Bold and fierce designs for the untamed music lover",
       price: "ZAR 1299",
-      image: "/lovable-uploads/item2.png",
+      image: "./lovable-uploads/item2.webp",
       gsm: "180 GSM Premium Cotton",
       color: "from-blue-600 to-purple-700"
     },
@@ -25,7 +25,7 @@ const Merchandise = () => {
       name: "Panther Collection",
       description: "Luxury edition with premium finishing details",
       price: "ZAR 2750",
-      image: "/lovable-uploads/item3.png",
+      image: "./lovable-uploads/item3.webp",
       gsm: "220 GSM Luxury Blend",
       color: "from-yellow-600 to-orange-600"
     },
@@ -33,7 +33,7 @@ const Merchandise = () => {
       name: "Panther Collection",
       description: "Exclusive design with sophisticated pattern work",
       price: "ZAR 1999",
-      image: "/lovable-uploads/item4.png",
+      image: "./lovable-uploads/item4.webp",
       gsm: "200 GSM Premium Cotton",
       color: "from-gray-600 to-blue-700"
     }
@@ -62,6 +62,8 @@ const Merchandise = () => {
                 <img 
                   src={collection.image} 
                   alt={collection.name}
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-64 object-cover transition-transform duration-500 group-hover:scale-110"
                 />
                 <div className={`absolute inset-0 bg-gradient-to-t ${collection.color} opacity-20 group-hover:opacity-30 transition-opacity duration-300`}></div>
