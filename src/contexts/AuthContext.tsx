@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, ReactNode } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { setAccountInfo } from '@/store/slices/accountInfo';
 import { loginApi } from '@/api';
@@ -17,7 +17,7 @@ interface AuthContextType {
   isLoading: boolean;
   error: string | null;
   showLoginModal: boolean;
-  
+
   // Actions
   login: (phoneNumber: string, password: string) => Promise<{ success: boolean; user?: PlayMyJamProfile; error?: string }>;
   logout: () => void;
@@ -31,7 +31,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const dispatch = useAppDispatch();
   const accountInfo = useAppSelector((state) => state.accountSlice.accountInfo);
-  
+
   const [authState, setAuthState] = useState<AuthState>({
     isLoading: false,
     error: null,
@@ -40,63 +40,63 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
   const isAuthenticated = !!accountInfo;
 
-  const login = async (phoneNumber: string, password: string) => {
-    setAuthState(prev => ({ ...prev, isLoading: true, error: null }));
-    
-    try {
-      const response = await loginApi(phoneNumber, password);
-      if (response.length > 0) {
-        const user = response[0] as PlayMyJamProfile;
-        dispatch(setAccountInfo(user));
-        setAuthState(prev => ({ ...prev, isLoading: false, showLoginModal: false }));
-        return { success: true, user };
-      } else {
-        setAuthState(prev => ({ 
-          ...prev, 
-          isLoading: false, 
-          error: 'Invalid phone number or password' 
-        }));
-        return { success: false, error: 'Invalid phone number or password' };
+    const login = useCallback(async (phoneNumber: string, password: string) => {
+      setAuthState(prev => ({ ...prev, isLoading: true, error: null }));
+
+      try {
+        const response = await loginApi(phoneNumber, password);
+        if (response.length > 0) {
+          const user = response[0] as PlayMyJamProfile;
+          dispatch(setAccountInfo(user));
+          setAuthState(prev => ({ ...prev, isLoading: false, showLoginModal: false }));
+          return { success: true, user };
+        } else {
+          setAuthState(prev => ({
+            ...prev,
+            isLoading: false,
+            error: 'Invalid phone number or password'
+          }));
+          return { success: false, error: 'Invalid phone number or password' };
+        }
+      } catch (error) {
+        const errorMessage = 'Login failed. Please try again.';
+        setAuthState(prev => ({ ...prev, isLoading: false, error: errorMessage }));
+        return { success: false, error: errorMessage };
       }
-    } catch (error) {
-      const errorMessage = 'Login failed. Please try again.';
-      setAuthState(prev => ({ ...prev, isLoading: false, error: errorMessage }));
-      return { success: false, error: errorMessage };
-    }
-  };
+  }, [dispatch]);
 
-  const logout = () => {
-    dispatch(setAccountInfo(null));
-    setAuthState(prev => ({ ...prev, error: null }));
-  };
+    const logout = useCallback(() => {
+      dispatch(setAccountInfo(null));
+      setAuthState(prev => ({ ...prev, error: null }));
+  }, [dispatch]);
 
-  const openLoginModal = () => {
-    setAuthState(prev => ({ ...prev, showLoginModal: true, error: null }));
-  };
+  const openLoginModal = useCallback(() => {
+    setAuthState(prev => (prev.showLoginModal && prev.error === null ? prev : { ...prev, showLoginModal: true, error: null }));
+  }, []);
 
-  const closeLoginModal = () => {
-    setAuthState(prev => ({ ...prev, showLoginModal: false, error: null }));
-  };
+  const closeLoginModal = useCallback(() => {
+    setAuthState(prev => (!prev.showLoginModal && prev.error === null ? prev : { ...prev, showLoginModal: false, error: null }));
+  }, []);
 
-  const clearError = () => {
-    setAuthState(prev => ({ ...prev, error: null }));
-  };
+  const clearError = useCallback(() => {
+    setAuthState(prev => (prev.error === null ? prev : { ...prev, error: null }));
+  }, []);
 
-  const value: AuthContextType = {
-    // State
-    user: accountInfo,
-    isAuthenticated,
-    isLoading: authState.isLoading,
-    error: authState.error,
-    showLoginModal: authState.showLoginModal,
-    
-    // Actions
-    login,
-    logout,
-    openLoginModal,
-    closeLoginModal,
-    clearError,
-  };
+    const value: AuthContextType = useMemo(() => ({
+      // State
+      user: accountInfo,
+      isAuthenticated,
+      isLoading: authState.isLoading,
+      error: authState.error,
+      showLoginModal: authState.showLoginModal,
+
+      // Actions
+      login,
+      logout,
+      openLoginModal,
+      closeLoginModal,
+      clearError,
+  }), [accountInfo, isAuthenticated, authState.isLoading, authState.error, authState.showLoginModal, login, logout, openLoginModal, closeLoginModal, clearError]);
 
   return (
     <AuthContext.Provider value={value}>

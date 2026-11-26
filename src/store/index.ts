@@ -12,22 +12,36 @@ const musicPlayerPersistConfig = {
   blacklist: ['isLoadingSongs', 'isRecording', 'recordingDuration'],
   transforms: [
     {
-      in: (state: any) => ({
-        ...state,
-        deckA: {
-          ...state.deckA,
-          isLoading: false,
-          isPlaying: false,
-          position: 0,
-        },
-        deckB: {
-          ...state.deckB,
-          isLoading: false,
-          isPlaying: false,
-          position: 0,
-        },
-      }),
-      out: (state: any) => state,
+      in: (inboundState: any, key: string) => {
+        if ((key === 'deckA' || key === 'deckB') && inboundState && typeof inboundState === 'object') {
+          return {
+            ...inboundState,
+            isLoading: false,
+            isPlaying: false,
+            position: 0,
+          };
+        }
+        return inboundState;
+      },
+      out: (outboundState: any, key: string) => {
+        // Recover cleanly if a previous session persisted a corrupted non-numeric volume/crossfader
+        if (key === 'masterVolume' && (typeof outboundState !== 'number' || !Number.isFinite(outboundState))) {
+          return 75;
+        }
+        if (key === 'crossfader' && (typeof outboundState !== 'number' || !Number.isFinite(outboundState))) {
+          return 50;
+        }
+        if ((key === 'deckA' || key === 'deckB') && outboundState && typeof outboundState === 'object') {
+          return {
+            ...outboundState,
+            volume: typeof outboundState.volume === 'number' && Number.isFinite(outboundState.volume) ? outboundState.volume : 75,
+            isLoading: false,
+            isPlaying: false,
+            position: 0,
+          };
+        }
+        return outboundState;
+      },
     }
   ],
 };

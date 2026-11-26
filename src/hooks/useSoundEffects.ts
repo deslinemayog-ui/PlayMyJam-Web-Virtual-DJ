@@ -44,7 +44,7 @@ export const useSoundEffects = () => {
   // Create or get audio element for effect
   const getAudioElement = useCallback((filename: string) => {
     if (!audioRefs.current.has(filename)) {
-      const audio = new Audio(`/effects/${filename}`);
+      const audio = new Audio(`./effects/${filename}`);
       audio.volume = 0.8;
       audio.preload = 'auto';
       

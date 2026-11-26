@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, User, Wallet, LogOut, Sparkles, Shuffle, ChevronDown, Hand } from 'lucide-react';
+import { ArrowLeft, User, Wallet, LogOut, Sparkles, Shuffle, ChevronDown, Hand, Radio } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { currencyFormatter } from '@/utils';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,10 @@ interface DJHeaderProps {
   onToggleDiscoLights?: (enabled: boolean) => void;
   airDJEnabled?: boolean;
   onToggleAirDJ?: (enabled: boolean) => void;
+  // TikTok Live props
+  isTikTokConnected?: boolean;
+  tiktokViewerCount?: number;
+  onOpenTikTokModal?: () => void;
   // Auto DJ props
   autoDJState?: any;
   currentSong?: any;
@@ -29,6 +33,9 @@ const DJHeader: React.FC<DJHeaderProps> = ({
   onToggleDiscoLights,
   airDJEnabled = false,
   onToggleAirDJ,
+  isTikTokConnected = false,
+  tiktokViewerCount = 0,
+  onOpenTikTokModal,
   autoDJState,
   currentSong,
   nextSong,
@@ -82,11 +89,10 @@ const DJHeader: React.FC<DJHeaderProps> = ({
                 onClick={() => setShowAutoDJPanel(!showAutoDJPanel)}
                 variant="outline"
                 size="sm"
-                className={`${
-                  autoDJState?.isEnabled
+                className={`${autoDJState?.isEnabled
                     ? 'border-green-500 text-green-400 bg-green-500/20'
                     : 'border-blue-500 text-blue-400 bg-blue-500/20'
-                } hover:bg-blue-500 hover:text-white font-montserrat-bold transition-colors`}
+                  } hover:bg-blue-500 hover:text-white font-montserrat-bold transition-colors`}
               >
                 <Shuffle className="w-4 h-4 mr-1" />
                 Auto DJ
@@ -102,19 +108,38 @@ const DJHeader: React.FC<DJHeaderProps> = ({
                       currentSong={currentSong}
                       nextSong={nextSong}
                       timeRemaining={timeRemaining || 0}
-                      startAutoDJ={startAutoDJ || (() => {})}
-                      stopAutoDJ={stopAutoDJ || (() => {})}
-                      skipToNext={skipToNext || (() => {})}
-                      updateTransitionDuration={updateTransitionDuration || (() => {})}
-                      updateCrossfadeSpeed={updateCrossfadeSpeed || (() => {})}
+                      startAutoDJ={startAutoDJ || (() => { })}
+                      stopAutoDJ={stopAutoDJ || (() => { })}
+                      skipToNext={skipToNext || (() => { })}
+                      updateTransitionDuration={updateTransitionDuration || (() => { })}
+                      updateCrossfadeSpeed={updateCrossfadeSpeed || (() => { })}
                     />
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Disco Lights Toggle */}
+            {/* Connect TikTok Button */}
             <Button
+              onClick={onOpenTikTokModal}
+              variant="outline"
+              size="sm"
+              className={`${isTikTokConnected
+                  ? 'border-[#25f4ee] text-[#25f4ee] bg-[#25f4ee]/15 hover:bg-[#25f4ee]/25'
+                  : 'border-[#fe2c55]/70 text-pink-300 bg-[#fe2c55]/15 hover:bg-[#fe2c55] hover:text-white'
+                } font-montserrat-bold transition-all`}
+            >
+              <Radio className={`w-4 h-4 mr-1.5 ${isTikTokConnected ? 'animate-pulse' : ''}`} />
+              {isTikTokConnected ? 'TikTok Live' : 'Connect TikTok'}
+              {isTikTokConnected && tiktokViewerCount > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.2 rounded-full bg-black/30 text-[10px]">
+                  {tiktokViewerCount.toLocaleString()}
+                </span>
+              )}
+            </Button>
+
+            {/* Disco Lights Toggle */}
+            {/**<Button
               onClick={() => onToggleDiscoLights?.(!discoLightsEnabled)}
               variant="outline"
               size="sm"
@@ -126,7 +151,7 @@ const DJHeader: React.FC<DJHeaderProps> = ({
             >
               <Sparkles className="w-4 h-4 mr-1" />
               Disco
-            </Button>
+            </Button> */}
 
             {/* Air DJ Motion Control Toggle - Commented out for now
             <Button
@@ -188,8 +213,22 @@ const DJHeader: React.FC<DJHeaderProps> = ({
             </Button>
           </div>
         ) : (
-          <div className="glass-card px-4 py-2">
-            <p className="text-gray-400 font-montserrat-light">Please login to continue</p>
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={onOpenTikTokModal}
+              variant="outline"
+              size="sm"
+              className={`${isTikTokConnected
+                  ? 'border-[#25f4ee] text-[#25f4ee] bg-[#25f4ee]/15 hover:bg-[#25f4ee]/25'
+                  : 'border-[#fe2c55]/70 text-pink-300 bg-[#fe2c55]/15 hover:bg-[#fe2c55] hover:text-white'
+                } font-montserrat-bold transition-all`}
+            >
+              <Radio className={`w-4 h-4 mr-1.5 ${isTikTokConnected ? 'animate-pulse' : ''}`} />
+              {isTikTokConnected ? 'TikTok Live' : 'Connect TikTok'}
+            </Button>
+            <div className="glass-card px-4 py-2">
+              <p className="text-gray-400 font-montserrat-light">Please login to continue</p>
+            </div>
           </div>
         )}
       </div>

@@ -2,11 +2,15 @@ import { app, BrowserWindow, protocol, ipcMain, net } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { pathToFileURL, fileURLToPath } from 'url';
-import { autoUpdater } from 'electron-updater';
+import electronUpdater from 'electron-updater';
+import { TikTokLiveManager } from './tiktokLiveManager';
+
+const { autoUpdater } = electronUpdater;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let mainWindow: BrowserWindow | null = null;
+const tiktokManager = new TikTokLiveManager(() => mainWindow?.webContents ?? null);
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -17,7 +21,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, 'preload.cjs'),
     },
   });
 
@@ -32,6 +36,7 @@ function createWindow() {
   }
 
   mainWindow.on('closed', () => {
+    void tiktokManager.disconnect();
     mainWindow = null;
   });
 }
@@ -131,6 +136,20 @@ app.whenReady().then(() => {
     autoUpdater.quitAndInstall();
   });
 
+  // TikTok Live Connector IPC handlers (gifts, chat, likes, viewers)
+  ipcMain.handle('tiktok-connect', async (_event, options: { uniqueId: string; signApiKey?: string }) => {
+    return tiktokManager.connect(options);
+  });
+
+  ipcMain.handle('tiktok-disconnect', async () => {
+    await tiktokManager.disconnect();
+    return { success: true };
+  });
+
+  ipcMain.handle('tiktok-status', () => {
+    return tiktokManager.getStatus();
+  });
+
   createWindow();
   setupAutoUpdater();
 
@@ -178,6 +197,10 @@ function setupAutoUpdater() {
     });
   }
 }
+
+app.on('before-quit', () => {
+  void tiktokManager.disconnect();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

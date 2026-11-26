@@ -1,10 +1,43 @@
 /// <reference types="vite/client" />
+import type {
+  TikTokChatEvent,
+  TikTokGiftEvent,
+  TikTokLikeEvent,
+  TikTokRoomStatsEvent,
+  TikTokSocialEvent,
+  TikTokStatusEvent,
+} from './types/tiktok';
 
-interface Window {
-  electronAPI?: {
-    scanMusic: () => Promise<string[]>;
-    storeGet: (key: string) => Promise<string | null>;
-    storeSet: (key: string, value: string) => Promise<void>;
-    storeDelete: (key: string) => Promise<void>;
-  };
+declare global {
+  interface Window {
+    electronAPI?: {
+      scanMusic: () => Promise<string[]>;
+      storeGet: (key: string) => Promise<string | null>;
+      storeSet: (key: string, value: string) => Promise<void>;
+      storeDelete: (key: string) => Promise<void>;
+      checkForUpdates?: () => Promise<unknown>;
+      restartAndInstallUpdate?: () => Promise<void>;
+      onUpdateAvailable?: (callback: (info: unknown) => void) => () => void;
+      onUpdateProgress?: (callback: (progress: unknown) => void) => () => void;
+      onUpdateDownloaded?: (callback: (info: unknown) => void) => () => void;
+      tiktok?: {
+        connect: (options: { uniqueId: string; signApiKey?: string }) => Promise<{
+          success: boolean;
+          roomId?: string;
+          uniqueId?: string;
+          error?: string;
+        }>;
+        disconnect: () => Promise<{ success: boolean }>;
+        getStatus: () => Promise<TikTokStatusEvent>;
+        onStatus: (callback: (status: TikTokStatusEvent) => void) => () => void;
+        onGift: (callback: (gift: TikTokGiftEvent) => void) => () => void;
+        onChat: (callback: (chat: TikTokChatEvent) => void) => () => void;
+        onLike: (callback: (like: TikTokLikeEvent) => void) => () => void;
+        onSocial: (callback: (social: TikTokSocialEvent) => void) => () => void;
+        onRoomStats: (callback: (stats: TikTokRoomStatsEvent) => void) => () => void;
+      };
+    };
+  }
 }
+
+export {};

@@ -1,24 +1,54 @@
 import React, { useState, useMemo } from 'react';
-import { Music, Search, User, X, Sparkles } from 'lucide-react';
+import {
+  Music,
+  Search,
+  User,
+  X,
+  Sparkles,
+  Globe,
+  Loader2,
+  Download,
+  ExternalLink,
+  Copy,
+  Check,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAudioLogic } from '@/hooks/useAudioLogic';
 import { currencyFormatter } from '@/utils';
 import { Song } from '@/Types';
 import ConfirmationDialog from '@/components/ui/ConfirmationDialog';
 import AIMusicTab from '@/components/virtualDJ/AIMusicTab';
+import {
+  fetchAndSaveExternalSong,
+  searchExternalSongs,
+  type ExternalSongSearchResult,
+} from '@/lib/playServerApi';
 
 interface MusicLibraryProps {
   songs: Song[];
   isLoadingSongs: boolean;
   loadTrackToDeckA: (song: Song) => void;
   loadTrackToDeckB: (song: Song) => void;
+  tiktokRequestCoinsBySongId?: Record<string, number>;
+  ownerId?: string;
+  userFolder?: string;
 }
+
+const formatDuration = (seconds: number) => {
+  if (!seconds || seconds <= 0) return '';
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
 
 const MusicLibrary: React.FC<MusicLibraryProps> = ({
   songs,
   isLoadingSongs,
   loadTrackToDeckA,
   loadTrackToDeckB,
+  tiktokRequestCoinsBySongId,
+  ownerId = '',
+  userFolder = 'dj_guest',
 }) => {
   // Initialize audio logic hook
   const {
@@ -46,6 +76,77 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
   // Search state for filtering tracks
   const [search, setSearch] = useState('');
+
+  // External search fallback state (when song isn't in PlayMyJam server library)
+  const [isSearchingExternal, setIsSearchingExternal] = useState(false);
+  const [externalResults, setExternalResults] = useState<ExternalSongSearchResult[]>([]);
+  const [externalSearchQuery, setExternalSearchQuery] = useState('');
+  const [externalError, setExternalError] = useState<string | null>(null);
+  const [fetchingVideoId, setFetchingVideoId] = useState<string | null>(null);
+  const [savedExternalSongs, setSavedExternalSongs] = useState<Record<string, Song>>({});
+  const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+    if (!value.trim()) {
+      setExternalResults([]);
+      setExternalError(null);
+      setExternalSearchQuery('');
+    }
+  };
+
+  const handleExternalSearch = async () => {
+    const q = search.trim();
+    if (q.length < 2 || isSearchingExternal) return;
+
+    setIsSearchingExternal(true);
+    setExternalError(null);
+    setExternalSearchQuery(q);
+
+    try {
+      const results = await searchExternalSongs(q, 5);
+      setExternalResults(results);
+      if (results.length === 0) {
+        setExternalError(`No external tracks found for "${q}".`);
+      }
+    } catch (err) {
+      setExternalResults([]);
+      setExternalError(err instanceof Error ? err.message : 'External search failed.');
+    } finally {
+      setIsSearchingExternal(false);
+    }
+  };
+
+  const handleFetchAndSaveExternal = async (item: ExternalSongSearchResult) => {
+    if (fetchingVideoId) return;
+    setFetchingVideoId(item.videoId);
+    setExternalError(null);
+
+    try {
+      const { song } = await fetchAndSaveExternalSong({
+        videoId: item.videoId,
+        query: `${item.artist} ${item.title}`,
+        ownerId,
+        user: userFolder,
+      });
+      setSavedExternalSongs((prev) => ({
+        ...prev,
+        [item.videoId]: song,
+      }));
+    } catch (err) {
+      setExternalError(err instanceof Error ? err.message : 'Failed to fetch and save song.');
+    } finally {
+      setFetchingVideoId(null);
+    }
+  };
+
+  const handleCopyUrl = (videoId: string, url: string) => {
+    navigator.clipboard?.writeText(url).catch(() => {});
+    setCopiedUrlId(videoId);
+    setTimeout(() => {
+      setCopiedUrlId((prev) => (prev === videoId ? null : prev));
+    }, 1800);
+  };
 
   // Handle local files selection
   const handleLocalFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -117,16 +218,21 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
       song.artist.toLowerCase().includes(search.toLowerCase())
     );
 
-    // Sort songs by currentBid (highest first), then by title
+    // Sort songs by PlayMyJam currentBid (highest first), then TikTok requests (highest coins first), then title
     return filteredSongs.sort((a, b) => {
       const bidA = a.currentBid || 0;
       const bidB = b.currentBid || 0;
       if (bidA !== bidB) {
-        return bidB - bidA; // Higher bids first
+        return bidB - bidA; // Higher PlayMyJam bids first
+      }
+      const ttA = source === 'server' ? (tiktokRequestCoinsBySongId?.[a.id] || 0) : 0;
+      const ttB = source === 'server' ? (tiktokRequestCoinsBySongId?.[b.id] || 0) : 0;
+      if (ttA !== ttB) {
+        return ttB - ttA; // Higher TikTok song requests next
       }
       return a.title.localeCompare(b.title); // Then alphabetical
     });
-  }, [songs, localSongs, search, source]); // Only recalculate when dependencies change
+  }, [songs, localSongs, search, source, tiktokRequestCoinsBySongId]); // Only recalculate when dependencies change
 
   // Handle cancel bid click
   const handleCancelBidClick = (song: Song) => {
@@ -244,14 +350,41 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
       {/* Search - only show for server/local tabs */}
       {source !== 'ai' && (
-        <div className="pt-3 border-t border-gray-700 mb-4">
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search tracks..."
-            className="w-full px-3 py-2 rounded bg-gray-800 text-white text-xs border border-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
-          />
+        <div className="pt-3 border-t border-gray-700 mb-4 space-y-2">
+          <div className="relative flex items-center gap-1.5">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && source === 'server' && search.trim().length >= 2) {
+                  e.preventDefault();
+                  void handleExternalSearch();
+                }
+              }}
+              placeholder={
+                source === 'server'
+                  ? 'Search PlayMyJam or press Enter to search online...'
+                  : 'Search tracks...'
+              }
+              className="w-full px-3 py-2 rounded bg-gray-800 text-white text-xs border border-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
+            />
+            {source === 'server' && search.trim().length >= 2 && (
+              <button
+                type="button"
+                onClick={() => void handleExternalSearch()}
+                disabled={isSearchingExternal}
+                title="Search online & import to Firebase"
+                className="px-2.5 py-2 rounded bg-cyan-600/80 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs flex items-center gap-1 flex-shrink-0 transition-colors"
+              >
+                {isSearchingExternal ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Globe className="w-3.5 h-3.5" />
+                )}
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -265,9 +398,34 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
             <p className="text-gray-400 text-sm">Loading music library...</p>
           </div>
         ) : sortedAndFilteredSongs.length === 0 ? (
-          <div className="text-center py-8">
-            <Music className="w-12 h-12 text-gray-600 mx-auto mb-2" />
-            <p className="text-gray-400 text-sm">No tracks available</p>
+          <div className="text-center py-6 space-y-3">
+            <Music className="w-10 h-10 text-gray-600 mx-auto" />
+            <p className="text-gray-400 text-xs">
+              {search.trim()
+                ? `No PlayMyJam track matched "${search.trim()}"`
+                : 'No tracks available'}
+            </p>
+            {source === 'server' && search.trim().length >= 2 && (
+              <Button
+                type="button"
+                size="sm"
+                onClick={() => void handleExternalSearch()}
+                disabled={isSearchingExternal}
+                className="bg-gradient-to-r from-cyan-600 to-purple-600 hover:opacity-95 text-white text-xs"
+              >
+                {isSearchingExternal ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                    Searching Online...
+                  </>
+                ) : (
+                  <>
+                    <Search className="w-3.5 h-3.5 mr-1.5" />
+                    Search &ldquo;{search.trim()}&rdquo; Online
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         ) : (
           // Use memoized sorted and filtered songs
@@ -275,6 +433,8 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
             const isPlaying = isSongPlaying(song.id);
             const hasBids = songHasBids(song.id);
             const bidAmount = getSongBidAmount(song.id);
+            const ttScore = source === 'server' ? (tiktokRequestCoinsBySongId?.[song.id] || 0) : 0;
+            const ttCoins = ttScore > 0 ? Math.max(0, Math.floor(ttScore) - 1) : null;
 
 
 
@@ -322,6 +482,15 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                         <span className="font-semibold">{currencyFormatter(bidAmount)}</span>
                       </div>
                     ) : null}
+
+                    {/* Read-only TikTok song request badge (never touches Firestore bids) */}
+                    {ttCoins !== null && (
+                      <div className="flex items-center gap-1 text-[10px] text-pink-300 mt-1">
+                        <span className="px-1.5 py-0.5 rounded bg-pink-500/20 border border-pink-500/40 font-semibold">
+                          TikTok Request • {ttCoins > 0 ? `${ttCoins} coins` : 'Free'}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Action Buttons */}
@@ -364,6 +533,163 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
               </div>
             );
           })
+        )}
+
+        {/* External Search Results (fetched via play-server & saved to Firebase) */}
+        {source === 'server' && (externalError || externalResults.length > 0) && (
+          <div className="mt-3 pt-3 border-t border-cyan-500/30 space-y-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="flex items-center gap-1.5 font-semibold text-cyan-300">
+                <Globe className="w-3.5 h-3.5" />
+                Online Results {externalSearchQuery ? `for "${externalSearchQuery}"` : ''}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setExternalResults([]);
+                  setExternalError(null);
+                }}
+                className="text-gray-400 hover:text-white text-[10px]"
+              >
+                Clear
+              </button>
+            </div>
+
+            {externalError && (
+              <div className="p-2 rounded-lg bg-red-500/15 border border-red-500/30 text-red-300 text-[11px]">
+                {externalError}
+              </div>
+            )}
+
+            {externalResults.map((item) => {
+              const savedSong = savedExternalSongs[item.videoId];
+              const isFetchingThis = fetchingVideoId === item.videoId;
+              const firebaseUrl = savedSong?.audioUrl || savedSong?.url || '';
+
+              return (
+                <div
+                  key={item.videoId}
+                  className={`rounded-lg p-2 border transition-colors ${
+                    savedSong
+                      ? 'bg-green-950/25 border-green-500/40'
+                      : 'bg-gray-800/50 border-cyan-500/25'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-md bg-gray-900 flex items-center justify-center overflow-hidden flex-shrink-0">
+                      {item.thumbnail ? (
+                        <img
+                          src={item.thumbnail}
+                          alt={item.title}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <Music className="w-4 h-4 text-cyan-300" />
+                      )}
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <h4 className="text-white font-semibold text-xs truncate">
+                        {savedSong?.title || item.title}
+                      </h4>
+                      <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                        <span className="truncate">{savedSong?.artist || item.artist}</span>
+                        {item.duration > 0 && (
+                          <span className="text-[10px] text-gray-500 flex-shrink-0">
+                            • {formatDuration(item.duration)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                      {savedSong ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-2 py-1 h-auto"
+                            onClick={() => loadTrackToDeckA(savedSong)}
+                            title="Load to Deck A"
+                          >
+                            A
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-white text-xs px-2 py-1 h-auto"
+                            onClick={() => loadTrackToDeckB(savedSong)}
+                            title="Load to Deck B"
+                          >
+                            B
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          disabled={Boolean(fetchingVideoId)}
+                          onClick={() => void handleFetchAndSaveExternal(item)}
+                          className="bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] px-2 py-1 h-auto"
+                        >
+                          {isFetchingThis ? (
+                            <>
+                              <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                              Saving...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="w-3 h-3 mr-1" />
+                              Import
+                            </>
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {savedSong && firebaseUrl && (
+                    <div className="mt-2 pt-1.5 border-t border-white/10 flex items-center justify-between gap-2 text-[10px]">
+                      <span className="text-green-400 font-semibold flex-shrink-0">
+                        Saved to Firebase
+                      </span>
+                      <a
+                        href={firebaseUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-cyan-300 hover:underline truncate flex-1"
+                        title={firebaseUrl}
+                      >
+                        {firebaseUrl}
+                      </a>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleCopyUrl(item.videoId, firebaseUrl)}
+                          className="p-1 rounded bg-white/10 hover:bg-white/20 text-gray-200"
+                          title="Copy Firebase URL"
+                        >
+                          {copiedUrlId === item.videoId ? (
+                            <Check className="w-3 h-3 text-green-400" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+                        <a
+                          href={firebaseUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-1 rounded bg-white/10 hover:bg-white/20 text-cyan-300"
+                          title="Open audio URL"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
         </div>
       </div>

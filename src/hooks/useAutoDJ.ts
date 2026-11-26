@@ -24,6 +24,8 @@ interface AutoDJHookProps {
   updateCrossfader: (value: number) => void;
   crossfader: number;
   handleSongUpdate: (song: Song, action: 'play' | 'pause' | 'stop', position?: number) => void;
+  tiktokRequestCoinsBySongId?: Record<string, number>;
+  onConsumeTikTokRequest?: (songId: string, deck?: 'A' | 'B') => void;
 }
 
 export const useAutoDJ = ({
@@ -36,7 +38,9 @@ export const useAutoDJ = ({
   toggleDeckB,
   updateCrossfader,
   crossfader,
-  handleSongUpdate
+  handleSongUpdate,
+  tiktokRequestCoinsBySongId,
+  onConsumeTikTokRequest,
 }: AutoDJHookProps) => {
   const [autoDJState, setAutoDJState] = useState<AutoDJState>({
     isEnabled: false,
@@ -62,23 +66,40 @@ export const useAutoDJ = ({
 
 
 
-  // Create a signature that only changes when bid values actually change
+  // Create a signature that only changes when PlayMyJam bids or TikTok request coins actually change
   const songsSignature = useMemo(() => {
-    return songs.map(song => `${song.id}:${song.currentBid || 0}:${song.title}`).join('|');
-  }, [songs]);
+    return songs
+      .map(song => `${song.id}:${song.currentBid || 0}:${tiktokRequestCoinsBySongId?.[song.id] || 0}:${song.title}`)
+      .join('|');
+  }, [songs, tiktokRequestCoinsBySongId]);
 
-  // Smart queue management for dynamic bid updates
+  // Smart queue management for dynamic PlayMyJam bid + TikTok gift request updates
   const createDynamicQueue = useCallback(() => {
+    const getTikTokCoins = (song: Song) => tiktokRequestCoinsBySongId?.[song.id] || 0;
+    const compareSongs = (a: Song, b: Song) => {
+      const bidA = a.currentBid || 0;
+      const bidB = b.currentBid || 0;
+      if (bidA !== bidB) {
+        return bidB - bidA; // 1. Higher PlayMyJam ZAR bids first (unchanged)
+      }
+      const ttA = getTikTokCoins(a);
+      const ttB = getTikTokCoins(b);
+      if (ttA !== ttB) {
+        return ttB - ttA; // 2. Higher TikTok gift coin requests next
+      }
+      return a.title.localeCompare(b.title); // 3. Then alphabetical
+    };
+
+    const hasHigherPriority = (candidate: Song, reference: Song) => {
+      const cBid = candidate.currentBid || 0;
+      const rBid = reference.currentBid || 0;
+      if (cBid !== rBid) return cBid > rBid;
+      return getTikTokCoins(candidate) > getTikTokCoins(reference);
+    };
+
     if (!autoDJState.isEnabled) {
       // If Auto DJ is not enabled, just return sorted songs
-      return [...songs].sort((a, b) => {
-        const bidA = a.currentBid || 0;
-        const bidB = b.currentBid || 0;
-        if (bidA !== bidB) {
-          return bidB - bidA; // Higher bids first
-        }
-        return a.title.localeCompare(b.title); // Then alphabetical
-      });
+      return [...songs].sort(compareSongs);
     }
 
     // Get currently playing song
@@ -95,40 +116,26 @@ export const useAutoDJ = ({
       song.id !== nextLoadedSong?.id
     );
 
-    // Sort other songs by bid priority
-    const sortedOtherSongs = otherSongs.sort((a, b) => {
-      const bidA = a.currentBid || 0;
-      const bidB = b.currentBid || 0;
-      if (bidA !== bidB) {
-        return bidB - bidA; // Higher bids first
-      }
-      return a.title.localeCompare(b.title); // Then alphabetical
-    });
+    // Sort other songs by bid + TikTok coin priority
+    const sortedOtherSongs = otherSongs.sort(compareSongs);
 
-    // Check if next loaded song should be bumped by higher bids
+    // Check if next loaded song should be bumped by higher bids or higher TikTok coin requests
     let finalQueue: any[] = [];
 
     if (currentlyPlaying.length > 0) {
       finalQueue.push(currentlyPlaying[0]);
 
-      // Check if any other song has higher bid than next loaded song
       if (nextLoaded.length > 0) {
-        const nextLoadedBid = nextLoaded[0].currentBid || 0;
-        const higherBidSongs = sortedOtherSongs.filter(song => (song.currentBid || 0) > nextLoadedBid);
+        const higherPrioritySongs = sortedOtherSongs.filter(song => hasHigherPriority(song, nextLoaded[0]));
 
-        if (higherBidSongs.length > 0) {
-          console.log(`🚨 QUEUE UPDATE: ${higherBidSongs.length} songs with higher bids than next loaded song`);
-          console.log(`📊 Next loaded: "${nextLoaded[0].title}" (${nextLoadedBid}), Highest new bid: "${higherBidSongs[0].title}" (${higherBidSongs[0].currentBid})`);
-
-          // Add higher bid songs first, then next loaded, then remaining
+        if (higherPrioritySongs.length > 0) {
           finalQueue = [
             ...currentlyPlaying,
-            ...higherBidSongs,
+            ...higherPrioritySongs,
             ...nextLoaded,
-            ...sortedOtherSongs.filter(song => (song.currentBid || 0) <= nextLoadedBid)
+            ...sortedOtherSongs.filter(song => !hasHigherPriority(song, nextLoaded[0]))
           ];
         } else {
-          // No higher bids, keep next loaded song in position
           finalQueue = [
             ...currentlyPlaying,
             ...nextLoaded,
@@ -136,26 +143,17 @@ export const useAutoDJ = ({
           ];
         }
       } else {
-        // No next loaded song, just add sorted other songs
         finalQueue = [
           ...currentlyPlaying,
           ...sortedOtherSongs
         ];
       }
     } else {
-      // No currently playing song, just return sorted songs
-      finalQueue = [...songs].sort((a, b) => {
-        const bidA = a.currentBid || 0;
-        const bidB = b.currentBid || 0;
-        if (bidA !== bidB) {
-          return bidB - bidA;
-        }
-        return a.title.localeCompare(b.title);
-      });
+      finalQueue = [...songs].sort(compareSongs);
     }
 
     return finalQueue;
-  }, [songsSignature, autoDJState.isEnabled, deckA.currentTrack?.id, deckB.currentTrack?.id]);
+  }, [songsSignature, autoDJState.isEnabled, deckA.currentTrack?.id, deckB.currentTrack?.id, tiktokRequestCoinsBySongId]);
 
   // Get dynamic queue - memoized to prevent excessive recalculations
   const sortedSongs = useMemo(() => {
@@ -225,10 +223,10 @@ export const useAutoDJ = ({
     const newNextIndex = newCurrentIndex + 1 < sortedSongs.length ? newCurrentIndex + 1 : 0;
     const newNextSong = sortedSongs[newNextIndex];
 
-    // If next song changed and it's different from what's loaded
-    if (newNextSong && nextLoadedSong && newNextSong.id !== nextLoadedSong.id) {
+    // If next song changed and it's different from what's loaded (or inactive deck is empty)
+    if (newNextSong && newNextSong.id !== currentPlayingSong.id && newNextSong.id !== nextLoadedSong?.id) {
       console.log(`🔄 QUEUE UPDATE DETECTED!`);
-      console.log(`📊 Old next: "${nextLoadedSong.title}" (${nextLoadedSong.currentBid || 0})`);
+      console.log(`📊 Old next: "${nextLoadedSong?.title || 'Empty'}" (${nextLoadedSong?.currentBid || 0})`);
       console.log(`📊 New next: "${newNextSong.title}" (${newNextSong.currentBid || 0})`);
 
       // Load new next song to inactive deck
@@ -534,6 +532,10 @@ export const useAutoDJ = ({
           }, 500); // Reduced delay for faster loading
         }
 
+        if (nextSongToPlay?.id && tiktokRequestCoinsBySongId?.[nextSongToPlay.id]) {
+          onConsumeTikTokRequest?.(nextSongToPlay.id, newActiveDeck);
+        }
+
         console.log(`✅ Transition complete. Now playing: "${sortedSongs[newCurrentIndex]?.title}" (Bid: ${sortedSongs[newCurrentIndex]?.currentBid || 0}) on Deck ${newActiveDeck}`);
 
         if (transitionIntervalRef.current) {
@@ -554,7 +556,7 @@ export const useAutoDJ = ({
       }
     }, 100); // Update every 100ms for smooth animation
 
-  }, [autoDJState, crossfader, deckA.isPlaying, deckB.isPlaying, toggleDeckA, toggleDeckB, updateCrossfader, sortedSongs, loadTrackToDeckA, loadTrackToDeckB, triggerBidClearing]);
+  }, [autoDJState, crossfader, deckA.isPlaying, deckB.isPlaying, toggleDeckA, toggleDeckB, updateCrossfader, sortedSongs, loadTrackToDeckA, loadTrackToDeckB, triggerBidClearing, tiktokRequestCoinsBySongId, onConsumeTikTokRequest]);
 
   // Monitor track progress and trigger transitions
   useEffect(() => {
@@ -601,9 +603,10 @@ export const useAutoDJ = ({
       }
 
       // Check transition conditions with detailed logging
-      const shouldTransition = timeRemaining > 0 && timeRemaining <= autoDJState.transitionDuration;
-      const isEmergency = timeRemaining <= 0 && activeDeckData?.currentTrack && !autoDJState.isTransitioning;
-      const isForceTransition = timeRemaining > 0 && timeRemaining <= 3 && !autoDJState.isTransitioning;
+      const hasValidDuration = Boolean(activeDeckData?.duration && activeDeckData.duration > 0);
+      const shouldTransition = hasValidDuration && timeRemaining > 0 && timeRemaining <= autoDJState.transitionDuration;
+      const isEmergency = hasValidDuration && timeRemaining <= 0 && activeDeckData?.currentTrack && !autoDJState.isTransitioning;
+      const isForceTransition = hasValidDuration && timeRemaining > 0 && timeRemaining <= 3 && !autoDJState.isTransitioning;
 
       // Debug transition conditions every check
       if (timeRemaining <= 20) { // Only log when getting close to transition time

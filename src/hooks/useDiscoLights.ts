@@ -65,32 +65,23 @@ export const useDiscoLights = (isPlaying: boolean, deckId: 'A' | 'B') => {
 
       console.log(`🎵 Audio element found for Deck ${deckId}:`, audioElement.src);
 
-      // Create audio context if it doesn't exist
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        console.log(`🎵 Created new AudioContext for Deck ${deckId}`);
+      // Reuse the AnalyserNode created by useMusicPlayer's Web Audio graph so we NEVER hijack
+      // createMediaElementSource() away from Deck EQ / Volume / Effects!
+      const sharedAnalyser = (audioElement as HTMLAudioElement & { __analyserNode?: AnalyserNode }).__analyserNode;
+      if (sharedAnalyser) {
+        analyserRef.current = sharedAnalyser;
+        dataArrayRef.current = new Uint8Array(sharedAnalyser.frequencyBinCount);
+        console.log(`✅ Disco lights reusing shared Deck ${deckId} analyser`);
+        return;
       }
 
-      // Create analyser node
-      analyserRef.current = audioContextRef.current.createAnalyser();
-      analyserRef.current.fftSize = 256;
-      analyserRef.current.smoothingTimeConstant = 0.8;
-
-      // Create data array for frequency data
-      const bufferLength = analyserRef.current.frequencyBinCount;
-      dataArrayRef.current = new Uint8Array(bufferLength);
-
-      // Connect audio source to analyser (avoid duplicate connections)
-      try {
-        const source = audioContextRef.current.createMediaElementSource(audioElement);
-        source.connect(analyserRef.current);
-        analyserRef.current.connect(audioContextRef.current.destination);
-        console.log(`✅ Audio analysis connected for Deck ${deckId}`);
-      } catch (connectError) {
-        console.warn(`⚠️ Audio already connected for Deck ${deckId}, using existing connection`);
-      }
-
-      console.log(`✅ Disco lights initialized for Deck ${deckId}`);
+      // If Web Audio analyser isn't ready yet, use lightweight animated fallback without stealing the audio element
+      setDiscoState(prev => ({
+        ...prev,
+        isActive: true,
+        colors: ['#FF0080', '#00FF80', '#8000FF', '#FF8000', '#0080FF', '#FF0040', '#40FF00', '#FF4000'],
+        intensity: 0.45
+      }));
     } catch (error) {
       console.error(`❌ Failed to initialize disco lights for Deck ${deckId}:`, error);
 
