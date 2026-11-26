@@ -7,3 +7,5 @@ README.md
 uploads/*
 nodemon.json
 .DS_Store
+*cookies*.txt
+upload-cookies.sh

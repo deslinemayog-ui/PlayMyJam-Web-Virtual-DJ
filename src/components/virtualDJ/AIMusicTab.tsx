@@ -36,7 +36,7 @@ interface AISong {
 const AIMusicTab: React.FC<AIMusicTabProps> = ({ loadTrackToDeckA, loadTrackToDeckB }) => {
   const accountInfo = useAppSelector((state) => state.accountSlice.accountInfo);
   const secrets = useAppSelector((state) => state.globalVariables.secrets);
-  const baseUrl = 'https://play-server-371330410186.europe-west1.run.app';
+  const baseUrl = 'https://play-server-371330410186.africa-south1.run.app';
 
   // AI-generated songs from Firestore
   const [aiSongs, setAiSongs] = useState<AISong[]>([]);

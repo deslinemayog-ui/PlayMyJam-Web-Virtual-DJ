@@ -8,7 +8,7 @@ import type {
   TikTokStatusEvent,
 } from '@/types/tiktok';
 
-const PROD_PLAY_SERVER_URL = 'https://play-server-371330410186.europe-west1.run.app';
+const PROD_PLAY_SERVER_URL = 'https://play-server-371330410186.africa-south1.run.app';
 const LOCAL_PLAY_SERVER_URL = 'http://localhost:3500';
 
 let cachedWorkingBaseUrl: string | null = null;

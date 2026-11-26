@@ -29,4 +29,6 @@ release/
 public/downloads/
 src/components/virtualDJ/commands.txt
 play/node_modules
+play/.env
+*cookies*.txt
 

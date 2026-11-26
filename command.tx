@@ -2,7 +2,7 @@ cd play && gcloud run deploy play-server --source . --region europe-west1 --allo
 
 npm run electron:build:mac   # or electron:build:win / electron:release
 
-
+./play/upload-cookies.sh play/cookies.txt
 Deployment Summary
 Project: sublime-calling-507411-e0
 Service & Region: play-server (europe-west1)

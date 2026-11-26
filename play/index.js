@@ -501,9 +501,81 @@ const FFMPEG_BIN = resolveBinary(
   ''
 );
 
-function runYtDlp(args, timeoutMs = 120000) {
+const WRITABLE_COOKIES_PATH = path.join(os.tmpdir(), 'ytdlp-cookies.txt');
+let seededCookiesSourceHash = null;
+let cookieJobChain = Promise.resolve();
+
+function hasRealCookieEntries(content) {
+  return String(content || '')
+    .split(/\r?\n/)
+    .some((line) => {
+      const trimmed = line.trim();
+      return trimmed.length > 0 && !trimmed.startsWith('#');
+    });
+}
+
+// Seed /tmp/ytdlp-cookies.txt ONCE per secret version so yt-dlp's rotated cookies persist across calls
+function ensureWritableCookiesCopy(content) {
+  const sourceHash = CryptoJS.SHA256(content).toString();
+  if (seededCookiesSourceHash !== sourceHash || !fs.existsSync(WRITABLE_COOKIES_PATH)) {
+    fs.writeFileSync(WRITABLE_COOKIES_PATH, content, { mode: 0o600 });
+    seededCookiesSourceHash = sourceHash;
+    console.log('[yt-dlp] Seeded writable cookies file in /tmp');
+  }
+  return WRITABLE_COOKIES_PATH;
+}
+
+function buildYtDlpCookieArgs() {
+  // 1. Optional base64-encoded cookies.txt env var
+  const cookiesB64 = (process.env.YTDLP_COOKIES_B64 || '').trim();
+  if (cookiesB64) {
+    try {
+      const decoded = Buffer.from(cookiesB64, 'base64').toString('utf8');
+      if (hasRealCookieEntries(decoded)) {
+        return ['--cookies', ensureWritableCookiesCopy(decoded)];
+      }
+    } catch (err) {
+      console.warn('[yt-dlp] Failed to decode YTDLP_COOKIES_B64:', err.message);
+    }
+  }
+
+  // 2. Mounted cookies.txt file (Cloud Run Secret Manager read-only mount -> seed writable /tmp once)
+  const cookieFile = (process.env.YTDLP_COOKIES_FILE || '').trim();
+  if (cookieFile) {
+    try {
+      if (fs.existsSync(cookieFile)) {
+        const content = fs.readFileSync(cookieFile, 'utf8');
+        if (hasRealCookieEntries(content)) {
+          return ['--cookies', ensureWritableCookiesCopy(content)];
+        }
+      }
+    } catch (err) {
+      console.warn(`[yt-dlp] Failed to read YTDLP_COOKIES_FILE (${cookieFile}):`, err.message);
+    }
+  }
+
+  // 3. Local development only: read cookies directly from a local desktop browser profile
+  const cookieBrowser = (process.env.YTDLP_COOKIES_FROM_BROWSER || '').trim();
+  if (cookieBrowser) {
+    return ['--cookies-from-browser', cookieBrowser];
+  }
+  return [];
+}
+
+function execYtDlpOnce(args, timeoutMs, useCookies) {
   return new Promise((resolve, reject) => {
-    const finalArgs = ['--force-ipv4', '--js-runtimes', 'node', ...args];
+    const cookieArgs = useCookies ? buildYtDlpCookieArgs() : [];
+    const finalArgs = [
+      '--force-ipv4',
+      '--js-runtimes',
+      'deno',
+      '--js-runtimes',
+      'node',
+      '--remote-components',
+      'ejs:github',
+      ...cookieArgs,
+      ...args,
+    ];
     if (FFMPEG_BIN) {
       finalArgs.unshift('--ffmpeg-location', path.dirname(FFMPEG_BIN));
     }
@@ -535,8 +607,11 @@ function runYtDlp(args, timeoutMs = 120000) {
           }
           const stderrLines = (stderr || '').trim().split('\n').filter(Boolean);
           const stdoutLines = (stdout || '').trim().split('\n').filter(Boolean);
+          if (stderrLines.length > 0) {
+            console.error('[yt-dlp stderr]\n' + stderrLines.join('\n'));
+          }
           const detail =
-            stderrLines.slice(-3).join(' | ') ||
+            stderrLines.slice(-5).join(' | ') ||
             stdoutLines.slice(-3).join(' | ') ||
             error.message;
           return reject(new Error(detail || 'yt-dlp failed'));
@@ -545,6 +620,20 @@ function runYtDlp(args, timeoutMs = 120000) {
       }
     );
   });
+}
+
+function runYtDlp(args, timeoutMs = 120000, options = {}) {
+  const useCookies = options.useCookies !== false;
+  if (!useCookies) {
+    return execYtDlpOnce(args, timeoutMs, false);
+  }
+  // Serialize cookie-backed yt-dlp calls so concurrent downloads never race-write /tmp/ytdlp-cookies.txt
+  const nextJob = cookieJobChain.then(
+    () => execYtDlpOnce(args, timeoutMs, true),
+    () => execYtDlpOnce(args, timeoutMs, true)
+  );
+  cookieJobChain = nextJob.catch(() => {});
+  return nextJob;
 }
 
 function cleanVideoTitle(raw) {
@@ -617,9 +706,11 @@ function formatSearchEntry(entry) {
 
 async function searchYouTubeTracks(searchQuery, limit = 5) {
   const safeLimit = Math.max(1, Math.min(8, Number(limit) || 5));
+  // Metadata flat-playlist search does not require YouTube cookies; skipping avoids unnecessary cookie rotation
   const { stdout } = await runYtDlp(
     ['--dump-single-json', '--flat-playlist', '--no-warnings', `ytsearch${safeLimit}:${searchQuery}`],
-    30000
+    30000,
+    { useCookies: false }
   );
 
   const parsed = JSON.parse(stdout);
@@ -833,9 +924,8 @@ app.post('/api/fetch-song', async (req, res) => {
           await runYtDlp(
             [
               '--no-playlist',
-              '--no-warnings',
               '-f',
-              'bestaudio[ext=m4a]/bestaudio[abr<=160]/bestaudio',
+              'bestaudio[ext=m4a]/bestaudio[abr<=160]/bestaudio/best',
               '-x',
               '--audio-format',
               'mp3',
@@ -1052,8 +1142,10 @@ function formatTikTokError(err) {
 app.get('/api/tiktok/health', (_req, res) => {
   res.json({
     ok: true,
+    region: process.env.CLOUD_RUN_REGION || 'local',
     activeStreams: activeTikTokConnections.size,
     maxStreams: MAX_CONCURRENT_TIKTOK_STREAMS,
+    ytdlpCookiesConfigured: buildYtDlpCookieArgs().length > 0,
   });
 });
 

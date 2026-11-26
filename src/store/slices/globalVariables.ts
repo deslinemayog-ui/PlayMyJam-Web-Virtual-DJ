@@ -36,7 +36,7 @@ const initialState: {secrets:SecretsType} = {
     premiumFee:75,
     playFee:0.5,
     bidShare:0.5,
-    baseUrl:'https://play-server-371330410186.europe-west1.run.app',
+    baseUrl:'https://play-server-371330410186.africa-south1.run.app',
     appId:'PL88518709',
     genres:[
       'Amapiano',
