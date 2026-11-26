@@ -14,7 +14,7 @@ import {
   findBestMatchingSong,
   getTikTokViewerKey,
 } from '@/lib/tiktokSongRequests';
-import { fetchAndSaveExternalSong } from '@/lib/playServerApi';
+import { connectTikTokLiveStream, fetchAndSaveExternalSong } from '@/lib/playServerApi';
 
 const STORAGE_KEY = 'playmyjam_tiktok_live_v1';
 
@@ -180,6 +180,9 @@ export const useTikTokLive = ({
   const lastGiftSfxAtRef = useRef<number>(0);
   const pendingAutoPlayUntilRef = useRef<number>(0);
   const inFlightExternalQueriesRef = useRef<Set<string>>(new Set());
+  const webAbortControllerRef = useRef<AbortController | null>(null);
+  const webReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const webSessionIdRef = useRef<number>(0);
 
   const deckStateRef = useRef<TikTokDeckPlaybackState>({
     deckATrackId: undefined,
@@ -771,8 +774,25 @@ export const useTikTokLive = ({
     };
   }, [handleIncomingGift, handleIncomingChat]);
 
+  const stopWebRelay = useCallback(() => {
+    webSessionIdRef.current += 1;
+    if (webReconnectTimerRef.current) {
+      clearTimeout(webReconnectTimerRef.current);
+      webReconnectTimerRef.current = null;
+    }
+    if (webAbortControllerRef.current) {
+      webAbortControllerRef.current.abort();
+      webAbortControllerRef.current = null;
+    }
+  }, []);
+
   const connect = useCallback(
-    async (overrideUsername?: string) => {
+    async (overrideUsername?: string): Promise<{
+      success: boolean;
+      roomId?: string;
+      uniqueId?: string;
+      error?: string;
+    }> => {
       const targetUser = (overrideUsername ?? config.username).trim();
       if (!targetUser) {
         const error = 'Enter your TikTok @username first.';
@@ -780,25 +800,164 @@ export const useTikTokLive = ({
         return { success: false, error };
       }
 
-      if (!window.electronAPI?.tiktok) {
-        const error = 'TikTok Live Connector requires the PlayMyJam Desktop (Electron) app.';
-        setStatus({ state: 'error', uniqueId: targetUser, error });
-        return { success: false, error };
-      }
-
       setIsMockMode(false);
       isMockModeRef.current = false;
 
-      return window.electronAPI.tiktok.connect({
-        uniqueId: targetUser,
-        signApiKey: config.signApiKey || undefined,
+      // 1. Electron Desktop App: use direct local Node.js IPC (residential IP, zero server load)
+      if (window.electronAPI?.tiktok) {
+        return window.electronAPI.tiktok.connect({
+          uniqueId: targetUser,
+          signApiKey: config.signApiKey || undefined,
+        });
+      }
+
+      // 2. Web Browser: connect via PlayMyJam play-server SSE relay (auto-reconnects on Cloud Run timeout)
+      stopWebRelay();
+      const sessionId = webSessionIdRef.current;
+      const cleanHandle = targetUser.replace(/^@+/, '');
+      const signApiKey = config.signApiKey || undefined;
+
+      setStatus({ state: 'connecting', uniqueId: cleanHandle });
+
+      return new Promise((resolve) => {
+        let initialSettled = false;
+        const settleInitial = (result: {
+          success: boolean;
+          roomId?: string;
+          uniqueId?: string;
+          error?: string;
+        }) => {
+          if (initialSettled) return;
+          initialSettled = true;
+          resolve(result);
+        };
+
+        const runStreamAttempt = async (attemptNumber: number) => {
+          if (webSessionIdRef.current !== sessionId || isMockModeRef.current) {
+            settleInitial({ success: false, error: 'Connection cancelled.' });
+            return;
+          }
+
+          const controller = new AbortController();
+          webAbortControllerRef.current = controller;
+
+          try {
+            const outcome = await connectTikTokLiveStream({
+              uniqueId: targetUser,
+              signApiKey,
+              signal: controller.signal,
+              onStatus: (next) => {
+                if (webSessionIdRef.current !== sessionId || isMockModeRef.current) return;
+                // While silently reconnecting after a prior drop, ignore transient 'connecting'
+                // unless we haven't connected yet.
+                if (next.state === 'connecting' && attemptNumber > 0) return;
+
+                // If stream drops unexpectedly (non-ended disconnect), keep connected UI briefly while reconnecting
+                if (next.state === 'disconnected' && !next.ended && attemptNumber >= 0 && initialSettled) {
+                  return;
+                }
+
+                setStatus(next);
+
+                if (next.state === 'connected') {
+                  settleInitial({
+                    success: true,
+                    roomId: next.roomId,
+                    uniqueId: next.uniqueId,
+                  });
+                } else if (next.state === 'error' && next.fatal) {
+                  settleInitial({
+                    success: false,
+                    uniqueId: next.uniqueId,
+                    error: next.error || 'Failed to connect to TikTok LIVE.',
+                  });
+                }
+              },
+              onGift: (gift) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  handleIncomingGift(gift);
+                }
+              },
+              onChat: (chat) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  handleIncomingChat(chat);
+                }
+              },
+              onLike: (like) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  setTotalLikes((prev) =>
+                    like.totalLikeCount > prev ? like.totalLikeCount : prev + like.likeCount
+                  );
+                }
+              },
+              onRoomStats: (stats) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  setViewerCount(stats.viewerCount);
+                }
+              },
+            });
+
+            if (webSessionIdRef.current !== sessionId || controller.signal.aborted) {
+              settleInitial({ success: false, error: 'Disconnected.' });
+              return;
+            }
+
+            if (outcome.fatalError) {
+              setStatus({ state: 'error', uniqueId: cleanHandle, error: outcome.fatalError });
+              settleInitial({ success: false, uniqueId: cleanHandle, error: outcome.fatalError });
+              return;
+            }
+
+            if (outcome.endedNaturally) {
+              settleInitial({ success: false, uniqueId: cleanHandle, error: 'TikTok LIVE stream ended.' });
+              return;
+            }
+
+            // Stream ended unexpectedly after connecting (e.g. Cloud Run 60-min limit or Wi-Fi blip) — auto-reconnect!
+            if (outcome.connectedOnce || initialSettled) {
+              const delayMs = Math.min(10000, 2000 * Math.pow(1.5, Math.min(attemptNumber, 4)));
+              showNotice('info', `Refreshing TikTok LIVE relay for @${cleanHandle}...`);
+              webReconnectTimerRef.current = setTimeout(() => {
+                void runStreamAttempt(attemptNumber + 1);
+              }, delayMs);
+              return;
+            }
+
+            const errMsg = 'TikTok LIVE stream closed before connecting.';
+            setStatus({ state: 'error', uniqueId: cleanHandle, error: errMsg });
+            settleInitial({ success: false, uniqueId: cleanHandle, error: errMsg });
+          } catch (err) {
+            if (webSessionIdRef.current !== sessionId || controller.signal.aborted) {
+              settleInitial({ success: false, error: 'Disconnected.' });
+              return;
+            }
+
+            const errMsg = err instanceof Error ? err.message : 'Failed to connect to TikTok LIVE relay.';
+
+            // If we were already connected and lost network temporarily, retry up to 5 times
+            if (initialSettled && attemptNumber < 5) {
+              const delayMs = Math.min(12000, 2500 * (attemptNumber + 1));
+              showNotice('warning', `TikTok relay interrupted — reconnecting in ${Math.round(delayMs / 1000)}s...`);
+              webReconnectTimerRef.current = setTimeout(() => {
+                void runStreamAttempt(attemptNumber + 1);
+              }, delayMs);
+              return;
+            }
+
+            setStatus({ state: 'error', uniqueId: cleanHandle, error: errMsg });
+            settleInitial({ success: false, uniqueId: cleanHandle, error: errMsg });
+          }
+        };
+
+        void runStreamAttempt(0);
       });
     },
-    [config.username, config.signApiKey]
+    [config.username, config.signApiKey, handleIncomingChat, handleIncomingGift, showNotice, stopWebRelay]
   );
 
   // Offline Mock Live session for local testing without going live on TikTok
   const startMockLive = useCallback(async () => {
+    stopWebRelay();
     if (window.electronAPI?.tiktok) {
       await window.electronAPI.tiktok.disconnect().catch(() => {});
     }
@@ -817,7 +976,7 @@ export const useTikTokLive = ({
         ? `Mock Live ready — ${songsRef.current.length} PlayMyJam songs + online search fallback active.`
         : 'Mock Live ready — online search fallback will fetch & save songs to Firebase.'
     );
-  }, [showNotice]);
+  }, [showNotice, stopWebRelay]);
 
   const simulateGift = useCallback(
     (params: {
@@ -882,11 +1041,12 @@ export const useTikTokLive = ({
   const disconnect = useCallback(async () => {
     setIsMockMode(false);
     isMockModeRef.current = false;
+    stopWebRelay();
     if (window.electronAPI?.tiktok) {
       await window.electronAPI.tiktok.disconnect();
     }
     setStatus({ state: 'disconnected', uniqueId: '' });
-  }, []);
+  }, [stopWebRelay]);
 
   // Mark a song request as playing/loaded rather than deleting it immediately from the UI
   const consumeSongRequest = useCallback((songId: string, deck?: 'A' | 'B') => {
@@ -1087,9 +1247,10 @@ export const useTikTokLive = ({
 
   useEffect(() => {
     return () => {
+      stopWebRelay();
       window.electronAPI?.tiktok?.disconnect().catch(() => {});
     };
-  }, []);
+  }, [stopWebRelay]);
 
   return {
     isElectron,

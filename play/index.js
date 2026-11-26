@@ -988,9 +988,342 @@ app.post('/api/fetch-song', async (req, res) => {
   }
 });
 
+// ============================================================================
+// TikTok LIVE Real-Time SSE Relay (enables Web Browser TikTok LIVE Connector)
+// ============================================================================
+
+const MAX_CONCURRENT_TIKTOK_STREAMS = 25;
+const activeTikTokConnections = new Set();
+let tiktokConnectorModulePromise = null;
+
+function loadTikTokConnector() {
+  if (!tiktokConnectorModulePromise) {
+    tiktokConnectorModulePromise = import('tiktok-live-connector');
+  }
+  return tiktokConnectorModulePromise;
+}
+
+function normalizeTikTokHandle(input) {
+  let clean = String(input || '').trim();
+  const urlMatch = clean.match(/tiktok\.com\/@([^/?#]+)/i);
+  if (urlMatch && urlMatch[1]) {
+    clean = urlMatch[1];
+  }
+  return clean.replace(/^@+/, '').trim();
+}
+
+function getTikTokAvatarUrl(user) {
+  return (
+    user?.avatarThumb?.urlList?.[0] ||
+    user?.avatarMedium?.urlList?.[0] ||
+    ''
+  );
+}
+
+function formatTikTokError(err) {
+  const inner = err && typeof err === 'object' && 'exception' in err ? err.exception : err;
+  const msg =
+    inner instanceof Error
+      ? inner.message
+      : typeof inner === 'string'
+        ? inner
+        : err && typeof err === 'object' && typeof err.message === 'string'
+          ? err.message
+          : err && typeof err === 'object' && typeof err.info === 'string'
+            ? err.info
+            : 'Connection failed';
+  const name = inner instanceof Error ? inner.name : err instanceof Error ? err.name : '';
+
+  if (name === 'UserOfflineError' || /offline|not live|LIVE has ended/i.test(msg)) {
+    return 'This TikTok account is currently offline. Start your TikTok LIVE first, then connect.';
+  }
+  if (/Failed to retrieve Room ID/i.test(msg)) {
+    return 'Could not find an active TikTok LIVE for this @username. Double-check the handle and make sure the account is currently LIVE.';
+  }
+  if (name === 'SignatureRateLimitError' || /rate limit/i.test(msg)) {
+    return 'TikTok signing service rate limit reached on the cloud relay. Wait a moment, add an EulerStream API key in Advanced settings, or use the PlayMyJam Desktop app.';
+  }
+  if (name === 'InvalidUniqueIdError') {
+    return 'Invalid TikTok username. Enter a valid handle like @yourname.';
+  }
+  return msg;
+}
+
+app.get('/api/tiktok/health', (_req, res) => {
+  res.json({
+    ok: true,
+    activeStreams: activeTikTokConnections.size,
+    maxStreams: MAX_CONCURRENT_TIKTOK_STREAMS,
+  });
+});
+
+app.post('/api/tiktok/stream', async (req, res) => {
+  const uniqueId = normalizeTikTokHandle(req.body?.uniqueId);
+  if (!uniqueId || uniqueId.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(uniqueId)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Please enter a valid TikTok @username.',
+    });
+  }
+
+  if (activeTikTokConnections.size >= MAX_CONCURRENT_TIKTOK_STREAMS) {
+    return res.status(503).json({
+      success: false,
+      error: 'TikTok LIVE relay is currently at full capacity. Please try again shortly or use the Desktop app.',
+    });
+  }
+
+  const signApiKey =
+    (typeof req.body?.signApiKey === 'string' && req.body.signApiKey.trim()) ||
+    (process.env.EULER_SIGN_API_KEY || '').trim() ||
+    undefined;
+
+  // Switch response to Server-Sent Events (SSE)
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') {
+    res.flushHeaders();
+  }
+
+  let cleanedUp = false;
+  let currentState = 'connecting';
+  let currentRoomId = '';
+  let conn = null;
+
+  const sendEvent = (eventName, payload) => {
+    if (cleanedUp || res.writableEnded || res.destroyed) return;
+    try {
+      res.write(`event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`);
+    } catch {
+      // client disconnected mid-write
+    }
+  };
+
+  const emitStatus = (state, extra = {}) => {
+    currentState = state;
+    sendEvent('status', {
+      state,
+      uniqueId,
+      roomId: currentRoomId || undefined,
+      ...extra,
+    });
+  };
+
+  const heartbeatTimer = setInterval(() => {
+    if (cleanedUp || res.writableEnded || res.destroyed) return;
+    try {
+      res.write(`: ping ${Date.now()}\n\n`);
+    } catch {
+      // ignore write error on dead socket
+    }
+  }, 20000);
+
+  const sessionHandle = {
+    uniqueId,
+    close: async (reason) => {
+      if (cleanedUp) return;
+      if (reason) {
+        emitStatus('disconnected', { error: reason });
+      }
+      await cleanup();
+    },
+  };
+
+  const cleanup = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    clearInterval(heartbeatTimer);
+    activeTikTokConnections.delete(sessionHandle);
+
+    if (conn) {
+      const target = conn;
+      conn = null;
+      try {
+        await target.disconnect();
+      } catch (err) {
+        console.warn(`[TikTokRelay] Disconnect warning for @${uniqueId}:`, err?.message || err);
+      }
+    }
+
+    if (!res.writableEnded && !res.destroyed) {
+      try {
+        res.end();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  activeTikTokConnections.add(sessionHandle);
+  // Note: On Node.js 16+ POST routes, `req.on('close')` fires as soon as the JSON body finishes
+  // reading, NOT when the client disconnects. Use `res.on('close')` to detect true client aborts.
+  res.on('close', () => {
+    void cleanup();
+  });
+
+  emitStatus('connecting');
+  console.log(`📡 [TikTokRelay] Connecting browser client to @${uniqueId} (active=${activeTikTokConnections.size})`);
+
+  try {
+    const { TikTokLiveConnection, WebcastEvent, ControlEvent } = await loadTikTokConnector();
+    if (cleanedUp) return;
+
+    const connectionOptions = {
+      processInitialData: true,
+      fetchRoomInfoOnConnect: true,
+      // Keep false: fetchRoomGiftsRoute calls EulerStream's paid signTikTokUrl.
+      enableExtendedGiftInfo: false,
+      ...(signApiKey ? { signApiKey } : {}),
+    };
+
+    conn = new TikTokLiveConnection(uniqueId, connectionOptions);
+
+    conn.on(WebcastEvent.GIFT, (data) => {
+      const ext = data.extendedGiftInfo;
+      const giftType = Number(data.gift?.type ?? ext?.type ?? 0);
+      const isStreakable = giftType === 1;
+      const repeatEnd = Number(data.repeatEnd ?? 0);
+      const isFinal = !isStreakable || repeatEnd === 1;
+      const repeatCount = Math.max(1, Number(data.repeatCount || data.comboCount || 1));
+      const diamondCount = Number(data.gift?.diamondCount ?? ext?.diamond_count ?? 1);
+      const giftPictureUrl =
+        data.gift?.image?.urlList?.[0] ||
+        data.gift?.icon?.urlList?.[0] ||
+        ext?.image?.url_list?.[0] ||
+        '';
+      const user = data.user;
+
+      sendEvent('gift', {
+        id: `${data.groupId || data.giftId || 'gift'}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        giftId: String(data.giftId ?? data.gift?.id ?? ''),
+        giftName: data.gift?.name || ext?.name || 'TikTok Gift',
+        giftPictureUrl,
+        diamondCount,
+        repeatCount,
+        totalDiamonds: diamondCount * repeatCount,
+        isStreakable,
+        isFinal,
+        groupId: String(data.groupId || ''),
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        profilePictureUrl: getTikTokAvatarUrl(user),
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.CHAT, (data) => {
+      const user = data.user;
+      sendEvent('chat', {
+        id: `chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        profilePictureUrl: getTikTokAvatarUrl(user),
+        comment: data.content || '',
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.LIKE, (data) => {
+      const user = data.user;
+      sendEvent('like', {
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        likeCount: Number(data.count ?? 1),
+        totalLikeCount: Number(data.total ?? 0),
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.ROOM_USER, (data) => {
+      sendEvent('roomStats', {
+        viewerCount: Number(data.total ?? 0),
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.FOLLOW, (data) => {
+      const user = data.user;
+      sendEvent('social', {
+        type: 'follow',
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        profilePictureUrl: getTikTokAvatarUrl(user),
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.SHARE, (data) => {
+      const user = data.user;
+      sendEvent('social', {
+        type: 'share',
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        profilePictureUrl: getTikTokAvatarUrl(user),
+        timestamp: Date.now(),
+      });
+    });
+
+    conn.on(WebcastEvent.STREAM_END, () => {
+      console.log(`🛑 [TikTokRelay] Stream ended for @${uniqueId}`);
+      emitStatus('disconnected', {
+        error: 'TikTok LIVE stream ended.',
+        ended: true,
+      });
+      void cleanup();
+    });
+
+    conn.on(ControlEvent.DISCONNECTED, () => {
+      if (!cleanedUp) {
+        emitStatus('disconnected');
+        void cleanup();
+      }
+    });
+
+    conn.on(ControlEvent.ERROR, (err) => {
+      console.warn(`[TikTokRelay] Event warning for @${uniqueId}:`, formatTikTokError(err));
+      // During 'connecting', conn.connect() tries fallback sources internally and rejects with the final error.
+      // During 'connected', transient decode warnings shouldn't interrupt the active feed.
+    });
+
+    const state = await conn.connect();
+    if (cleanedUp) {
+      await cleanup();
+      return;
+    }
+
+    currentRoomId = String(state?.roomId || conn.roomId || '');
+    console.log(`✅ [TikTokRelay] Connected to @${uniqueId} (roomId=${currentRoomId})`);
+    emitStatus('connected');
+  } catch (err) {
+    const message = formatTikTokError(err);
+    console.error(`❌ [TikTokRelay] Connect failed for @${uniqueId}:`, message);
+    emitStatus('error', { error: message, fatal: true });
+    await cleanup();
+  }
+});
+
 // Start the server
 const server = app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
+});
+
+// Allow long-lived SSE streams (60 min matches Cloud Run max timeout)
+server.requestTimeout = 0;
+server.headersTimeout = 65000;
+server.keepAliveTimeout = 65000;
+
+process.on('SIGTERM', async () => {
+  console.log('[Server] SIGTERM received, closing active TikTok LIVE relay streams...');
+  await Promise.allSettled(Array.from(activeTikTokConnections).map((s) => s.close()));
+  server.close(() => process.exit(0));
 });
 
 server.on('error', (err) => {

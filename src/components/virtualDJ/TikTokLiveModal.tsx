@@ -314,10 +314,10 @@ const TikTokLiveModal: React.FC<TikTokLiveModalProps> = ({
         {!live.isConnected ? (
           <form onSubmit={handleConnectSubmit} className="p-5 space-y-4">
             {!live.isElectron && (
-              <div className="flex items-start gap-2 p-3 rounded-xl bg-yellow-500/15 border border-yellow-500/30 text-yellow-200 text-xs">
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+              <div className="flex items-start gap-2 p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/25 text-cyan-200 text-xs">
+                <Globe className="w-4 h-4 flex-shrink-0 mt-0.5 text-cyan-300" />
                 <span>
-                  Live TikTok connection requires the PlayMyJam Desktop (Electron) app.
+                  Web Relay Mode — streams TikTok LIVE via PlayMyJam Cloud Server. For direct local connection, you can also use the Desktop app.
                 </span>
               </div>
             )}

@@ -1,4 +1,12 @@
 import type { Song } from '@/Types';
+import type {
+  TikTokChatEvent,
+  TikTokGiftEvent,
+  TikTokLikeEvent,
+  TikTokRoomStatsEvent,
+  TikTokSocialEvent,
+  TikTokStatusEvent,
+} from '@/types/tiktok';
 
 const PROD_PLAY_SERVER_URL = 'https://play-server-371330410186.europe-west1.run.app';
 const LOCAL_PLAY_SERVER_URL = 'http://localhost:3500';
@@ -180,4 +188,198 @@ export async function fetchAndSaveExternalSong(params: {
   };
 
   return { song, cached: Boolean(res.cached) };
+}
+
+export interface TikTokStreamStatusPayload extends TikTokStatusEvent {
+  ended?: boolean;
+  fatal?: boolean;
+}
+
+export interface ConnectTikTokStreamParams {
+  uniqueId: string;
+  signApiKey?: string;
+  signal: AbortSignal;
+  onStatus?: (status: TikTokStreamStatusPayload) => void;
+  onGift?: (gift: TikTokGiftEvent) => void;
+  onChat?: (chat: TikTokChatEvent) => void;
+  onLike?: (like: TikTokLikeEvent) => void;
+  onRoomStats?: (stats: TikTokRoomStatsEvent) => void;
+  onSocial?: (social: TikTokSocialEvent) => void;
+}
+
+export interface TikTokStreamOutcome {
+  connectedOnce: boolean;
+  endedNaturally: boolean;
+  fatalError?: string;
+}
+
+/**
+ * Opens a Server-Sent Events (SSE) stream against play-server (`POST /api/tiktok/stream`)
+ * so TikTok LIVE works directly in web browsers without Electron.
+ */
+export async function connectTikTokLiveStream(
+  params: ConnectTikTokStreamParams
+): Promise<TikTokStreamOutcome> {
+  const urls = getCandidateBaseUrls();
+  let response: Response | null = null;
+  let lastError: Error | null = null;
+
+  for (const baseUrl of urls) {
+    if (params.signal.aborted) {
+      return { connectedOnce: false, endedNaturally: true };
+    }
+
+    try {
+      const res = await fetch(`${baseUrl}/api/tiktok/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify({
+          uniqueId: params.uniqueId,
+          signApiKey: params.signApiKey || undefined,
+        }),
+        signal: params.signal,
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+
+      if (!res.ok) {
+        const isJson = contentType.includes('application/json');
+        const payload = isJson ? await res.json().catch(() => ({})) : {};
+        // If local dev play-server doesn't have /api/tiktok/stream yet, fall back to Cloud Run
+        if (res.status === 404 && !isJson && baseUrl === LOCAL_PLAY_SERVER_URL) {
+          lastError = new Error(
+            `Local play-server (${LOCAL_PLAY_SERVER_URL}) does not have /api/tiktok/stream yet.`
+          );
+          continue;
+        }
+        throw new Error(payload?.error || `TikTok relay failed (${res.status}) on ${baseUrl}`);
+      }
+
+      if (!res.body) {
+        throw new Error('Browser does not support streaming responses for TikTok LIVE relay.');
+      }
+
+      cachedWorkingBaseUrl = baseUrl;
+      response = res;
+      break;
+    } catch (err) {
+      if (params.signal.aborted) {
+        return { connectedOnce: false, endedNaturally: true };
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      const isNetworkErr =
+        err instanceof TypeError ||
+        /failed to fetch|networkerror|load failed|err_connection_refused/i.test(message);
+      lastError = err instanceof Error ? err : new Error(message);
+      if (!isNetworkErr) {
+        throw lastError;
+      }
+    }
+  }
+
+  if (!response || !response.body) {
+    throw lastError || new Error('Unable to reach PlayMyJam TikTok LIVE relay server.');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let connectedOnce = false;
+  let endedNaturally = false;
+  let fatalError: string | undefined;
+
+  const dispatchFrame = (rawFrame: string) => {
+    const lines = rawFrame.split(/\r?\n/);
+    let eventName = 'message';
+    const dataLines: string[] = [];
+
+    for (const line of lines) {
+      if (!line || line.startsWith(':')) continue;
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trimStart());
+      }
+    }
+
+    if (dataLines.length === 0) return;
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(dataLines.join('\n'));
+    } catch {
+      return;
+    }
+
+    switch (eventName) {
+      case 'status': {
+        const statusPayload = payload as TikTokStreamStatusPayload;
+        if (statusPayload.state === 'connected') {
+          connectedOnce = true;
+        }
+        if (statusPayload.ended) {
+          endedNaturally = true;
+        }
+        if (statusPayload.state === 'error' && statusPayload.fatal) {
+          fatalError = statusPayload.error || 'TikTok LIVE connection failed.';
+        }
+        params.onStatus?.(statusPayload);
+        break;
+      }
+      case 'gift':
+        params.onGift?.(payload as TikTokGiftEvent);
+        break;
+      case 'chat':
+        params.onChat?.(payload as TikTokChatEvent);
+        break;
+      case 'like':
+        params.onLike?.(payload as TikTokLikeEvent);
+        break;
+      case 'roomStats':
+        params.onRoomStats?.(payload as TikTokRoomStatsEvent);
+        break;
+      case 'social':
+        params.onSocial?.(payload as TikTokSocialEvent);
+        break;
+      default:
+        break;
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
+        if (frame.trim()) {
+          dispatchFrame(frame);
+        }
+      }
+    }
+
+    // Flush any remaining partial frame
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      dispatchFrame(buffer);
+    }
+  } catch (err) {
+    if (!params.signal.aborted) {
+      throw err;
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore cancel errors
+    }
+  }
+
+  return { connectedOnce, endedNaturally, fatalError };
 }

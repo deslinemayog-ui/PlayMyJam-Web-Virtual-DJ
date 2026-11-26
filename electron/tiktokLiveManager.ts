@@ -37,11 +37,25 @@ function getAvatarUrl(user?: User): string {
 }
 
 function formatError(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err || 'Connection failed');
-  const name = err instanceof Error ? err.name : '';
+  const obj = err && typeof err === 'object' ? (err as Record<string, unknown>) : null;
+  const inner = obj && 'exception' in obj ? obj.exception : err;
+  const msg =
+    inner instanceof Error
+      ? inner.message
+      : typeof inner === 'string'
+        ? inner
+        : obj && typeof obj.message === 'string'
+          ? obj.message
+          : obj && typeof obj.info === 'string'
+            ? obj.info
+            : 'Connection failed';
+  const name = inner instanceof Error ? inner.name : err instanceof Error ? err.name : '';
 
   if (name === 'UserOfflineError' || /offline|not live|LIVE has ended/i.test(msg)) {
     return 'This TikTok account is currently offline. Start your TikTok LIVE first, then connect.';
+  }
+  if (/Failed to retrieve Room ID/i.test(msg)) {
+    return 'Could not find an active TikTok LIVE for this @username. Double-check the handle and make sure the account is currently LIVE.';
   }
   if (name === 'SignatureRateLimitError' || /rate limit/i.test(msg)) {
     return 'TikTok signing service rate limit reached. Wait a moment or add an EulerStream API key in Advanced settings.';
@@ -229,12 +243,9 @@ export class TikTokLiveManager {
       });
 
       conn.on(ControlEvent.ERROR, (err: unknown) => {
-        console.error('[TikTokLive] Error:', err);
-        // Only surface connection-breaking errors when not actively connected;
-        // transient webcast decode warnings shouldn't hide the live queue/feed UI.
-        if (this.state !== 'connected') {
-          this.emitStatus('error', formatError(err));
-        }
+        console.warn('[TikTokLive] Event warning:', formatError(err));
+        // During 'connecting', conn.connect() emits intermediate fallback warnings before rejecting cleanly.
+        // During 'connected', transient decode warnings shouldn't hide the live queue/feed UI.
       });
 
       const state = await conn.connect();
