@@ -13,10 +13,17 @@ interface AutoDJState {
   crossfadeSpeed: number; // seconds to complete crossfade
 }
 
+interface DeckStateLike {
+  currentTrack: Song | null;
+  isPlaying: boolean;
+  position?: number;
+  duration?: number;
+}
+
 interface AutoDJHookProps {
   songs: Song[];
-  deckA: any;
-  deckB: any;
+  deckA: DeckStateLike;
+  deckB: DeckStateLike;
   loadTrackToDeckA: (song: Song) => void;
   loadTrackToDeckB: (song: Song) => void;
   toggleDeckA: () => void;
@@ -49,224 +56,282 @@ export const useAutoDJ = ({
     activeDeck: 'A',
     isTransitioning: false,
     transitionProgress: 0,
-    transitionDuration: 15, // Start transition 15 seconds before end (much earlier)
-    crossfadeSpeed: 6 // 6 seconds to complete crossfade
+    transitionDuration: 15, // Start transition 15 seconds before end
+    crossfadeSpeed: 6, // 6 seconds to complete crossfade
   });
 
-  const transitionIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const monitorIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const bidClearingTrackerRef = useRef<Set<string>>(new Set()); // Track which songs have had bid clearing triggered
+  const transitionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingLoadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bidClearingTrackerRef = useRef<Set<string>>(new Set());
 
   // --- Audible Playback Time Tracking for Bid Clearing ---
-  // This effect tracks the actual audible playback time for the current song on the active deck
-  // and only clears the bid after 45 seconds of playback with volume > 0.05.
-  const playbackTimeRef = useRef(0); // Accumulated audible playback time in seconds
-  const bidClearedRef = useRef<string | null>(null); // Track which song's bid has been cleared
-  const playbackIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const playbackTimeRef = useRef(0);
+  const bidClearedRef = useRef<string | null>(null);
+  const playbackIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // --- Stable Regular-Playlist Cursor ---
+  // Tracks the last non-request track played from the alphabetical base playlist.
+  // Priority requests (PlayMyJam ZAR bids & TikTok requests) play immediately next
+  // WITHOUT moving this cursor, so regular playback resumes cleanly at index+1 afterwards.
+  const lastRegularSongIdRef = useRef<string | null>(null);
+  const lastRegularIndexRef = useRef<number>(-1);
+  // Tracks whether the currently playing track ID entered playback as a priority request
+  // (so clearing its bid/request mid-song doesn't mistakenly anchor the regular cursor to it).
+  const currentPlayingPriorityTrackIdRef = useRef<string | null>(null);
 
+  // Live refs to avoid stale closures inside transition/load timers
+  const deckARef = useRef(deckA);
+  const deckBRef = useRef(deckB);
+  const songsRef = useRef(songs);
+  const tiktokCoinsRef = useRef(tiktokRequestCoinsBySongId);
+  const onConsumeTikTokRequestRef = useRef(onConsumeTikTokRequest);
 
-  // Create a signature that only changes when PlayMyJam bids or TikTok request coins actually change
-  const songsSignature = useMemo(() => {
-    return songs
-      .map(song => `${song.id}:${song.currentBid || 0}:${tiktokRequestCoinsBySongId?.[song.id] || 0}:${song.title}`)
-      .join('|');
-  }, [songs, tiktokRequestCoinsBySongId]);
+  // Keep refs synchronously up-to-date so callbacks & memos never read 1-render-stale state
+  deckARef.current = deckA;
+  deckBRef.current = deckB;
+  songsRef.current = songs;
+  tiktokCoinsRef.current = tiktokRequestCoinsBySongId;
+  onConsumeTikTokRequestRef.current = onConsumeTikTokRequest;
 
-  // Smart queue management for dynamic PlayMyJam bid + TikTok gift request updates
-  const createDynamicQueue = useCallback(() => {
-    const getTikTokCoins = (song: Song) => tiktokRequestCoinsBySongId?.[song.id] || 0;
-    const compareSongs = (a: Song, b: Song) => {
+  // Stable alphabetical base playlist (matches MusicLibrary's default ordering)
+  const basePlaylist = useMemo(() => {
+    return [...songs].sort((a, b) => {
+      const titleCmp = (a.title || '').localeCompare(b.title || '');
+      if (titleCmp !== 0) return titleCmp;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+  }, [songs]);
+
+  const basePlaylistRef = useRef(basePlaylist);
+  basePlaylistRef.current = basePlaylist;
+
+  // Helper: check whether a song currently has an active PlayMyJam bid or TikTok request
+  const isPrioritySong = useCallback(
+    (song: Song | null | undefined, coinsMap?: Record<string, number>): boolean => {
+      if (!song) return false;
+      const liveSong = songsRef.current.find((s) => s.id === song.id) || song;
+      const bid = liveSong.currentBid || 0;
+      const ttCoins = (coinsMap ?? tiktokCoinsRef.current)?.[song.id] || 0;
+      return bid > 0 || ttCoins > 0;
+    },
+    []
+  );
+
+  // Helper: compare priority requests (PlayMyJam ZAR bids first, then TikTok coins, then title)
+  const comparePrioritySongs = useCallback(
+    (a: Song, b: Song, coinsMap?: Record<string, number>) => {
       const bidA = a.currentBid || 0;
       const bidB = b.currentBid || 0;
-      if (bidA !== bidB) {
-        return bidB - bidA; // 1. Higher PlayMyJam ZAR bids first (unchanged)
+      if (bidA !== bidB) return bidB - bidA;
+      const map = coinsMap ?? tiktokCoinsRef.current;
+      const ttA = map?.[a.id] || 0;
+      const ttB = map?.[b.id] || 0;
+      if (ttA !== ttB) return ttB - ttA;
+      const titleCmp = (a.title || '').localeCompare(b.title || '');
+      return titleCmp !== 0 ? titleCmp : (a.id || '').localeCompare(b.id || '');
+    },
+    []
+  );
+
+  // Core selector: always picks highest-priority pending request first;
+  // otherwise resumes the base playlist right after `lastRegularSongIdRef` (never resetting to 0, 1, 2!).
+  const pickNextSong = useCallback(
+    (
+      currentlyPlayingSong: Song | null | undefined,
+      options?: { excludeIds?: string[]; coinsMap?: Record<string, number> }
+    ): { song: Song | null; isPriority: boolean; baseIndex: number } => {
+      const playlist = basePlaylistRef.current;
+      if (playlist.length === 0) {
+        return { song: null, isPriority: false, baseIndex: -1 };
       }
-      const ttA = getTikTokCoins(a);
-      const ttB = getTikTokCoins(b);
-      if (ttA !== ttB) {
-        return ttB - ttA; // 2. Higher TikTok gift coin requests next
+
+      const coinsMap = options?.coinsMap ?? tiktokCoinsRef.current;
+      const excluded = new Set<string>(options?.excludeIds || []);
+      if (currentlyPlayingSong?.id) {
+        excluded.add(currentlyPlayingSong.id);
       }
-      return a.title.localeCompare(b.title); // 3. Then alphabetical
-    };
 
-    const hasHigherPriority = (candidate: Song, reference: Song) => {
-      const cBid = candidate.currentBid || 0;
-      const rBid = reference.currentBid || 0;
-      if (cBid !== rBid) return cBid > rBid;
-      return getTikTokCoins(candidate) > getTikTokCoins(reference);
-    };
+      // 1. Pending priority requests (PlayMyJam ZAR bids & TikTok requests) always jump to next
+      const pendingRequests = playlist
+        .filter((s) => !excluded.has(s.id) && ((s.currentBid || 0) > 0 || (coinsMap?.[s.id] || 0) > 0))
+        .sort((a, b) => comparePrioritySongs(a, b, coinsMap));
 
-    if (!autoDJState.isEnabled) {
-      // If Auto DJ is not enabled, just return sorted songs
-      return [...songs].sort(compareSongs);
-    }
+      if (pendingRequests.length > 0) {
+        const chosen = pendingRequests[0];
+        const baseIndex = playlist.findIndex((s) => s.id === chosen.id);
+        return { song: chosen, isPriority: true, baseIndex };
+      }
 
-    // Get currently playing song
-    const currentPlayingSong = autoDJState.activeDeck === 'A' ? deckA.currentTrack : deckB.currentTrack;
-    const nextLoadedSong = autoDJState.activeDeck === 'A' ? deckB.currentTrack : deckA.currentTrack;
+      // 2. No pending requests — resume regular base playlist right after the last regular track
+      let anchorIdx = -1;
+      if (lastRegularSongIdRef.current) {
+        anchorIdx = playlist.findIndex((s) => s.id === lastRegularSongIdRef.current);
+      }
+      if (anchorIdx === -1 && lastRegularIndexRef.current >= 0) {
+        anchorIdx = Math.min(lastRegularIndexRef.current, playlist.length - 1);
+      }
+      if (anchorIdx === -1 && currentlyPlayingSong?.id) {
+        anchorIdx = playlist.findIndex((s) => s.id === currentlyPlayingSong.id);
+      }
 
-    // Separate songs into categories
-    const currentlyPlaying = currentPlayingSong ? [currentPlayingSong] : [];
-    const nextLoaded = nextLoadedSong && nextLoadedSong.id !== currentPlayingSong?.id ? [nextLoadedSong] : [];
-
-    // Get all other songs (not currently playing or loaded)
-    const otherSongs = songs.filter(song =>
-      song.id !== currentPlayingSong?.id &&
-      song.id !== nextLoadedSong?.id
-    );
-
-    // Sort other songs by bid + TikTok coin priority
-    const sortedOtherSongs = otherSongs.sort(compareSongs);
-
-    // Check if next loaded song should be bumped by higher bids or higher TikTok coin requests
-    let finalQueue: any[] = [];
-
-    if (currentlyPlaying.length > 0) {
-      finalQueue.push(currentlyPlaying[0]);
-
-      if (nextLoaded.length > 0) {
-        const higherPrioritySongs = sortedOtherSongs.filter(song => hasHigherPriority(song, nextLoaded[0]));
-
-        if (higherPrioritySongs.length > 0) {
-          finalQueue = [
-            ...currentlyPlaying,
-            ...higherPrioritySongs,
-            ...nextLoaded,
-            ...sortedOtherSongs.filter(song => !hasHigherPriority(song, nextLoaded[0]))
-          ];
-        } else {
-          finalQueue = [
-            ...currentlyPlaying,
-            ...nextLoaded,
-            ...sortedOtherSongs
-          ];
+      // Walk forward linearly from (anchorIdx + 1), wrapping to 0 only after the end of the playlist
+      for (let offset = 1; offset <= playlist.length; offset++) {
+        const idx = (anchorIdx + offset + playlist.length) % playlist.length;
+        const candidate = playlist[idx];
+        if (candidate && !excluded.has(candidate.id)) {
+          return { song: candidate, isPriority: false, baseIndex: idx };
         }
-      } else {
-        finalQueue = [
-          ...currentlyPlaying,
-          ...sortedOtherSongs
-        ];
       }
-    } else {
-      finalQueue = [...songs].sort(compareSongs);
+
+      // Fallback (e.g. single-track library)
+      return { song: playlist[0], isPriority: false, baseIndex: 0 };
+    },
+    [comparePrioritySongs]
+  );
+
+  // Schedule a single non-overlapping load onto the standby deck
+  const scheduleStandbyLoad = useCallback(
+    (deck: 'A' | 'B', song: Song, delayMs = 350) => {
+      if (pendingLoadTimeoutRef.current) {
+        clearTimeout(pendingLoadTimeoutRef.current);
+        pendingLoadTimeoutRef.current = null;
+      }
+      pendingLoadTimeoutRef.current = setTimeout(() => {
+        pendingLoadTimeoutRef.current = null;
+        if (deck === 'A') {
+          loadTrackToDeckA(song);
+        } else {
+          loadTrackToDeckB(song);
+        }
+      }, delayMs);
+    },
+    [loadTrackToDeckA, loadTrackToDeckB]
+  );
+
+  // Create a signature that changes when bids, TikTok requests, or library tracks change
+  const songsSignature = useMemo(() => {
+    return basePlaylist
+      .map((song) => `${song.id}:${song.currentBid || 0}:${tiktokRequestCoinsBySongId?.[song.id] || 0}`)
+      .join('|');
+  }, [basePlaylist, tiktokRequestCoinsBySongId]);
+
+  // Resolve the live active-deck Song object (with latest Firestore bid info)
+  const activeDeckTrack = autoDJState.activeDeck === 'A' ? deckA.currentTrack : deckB.currentTrack;
+  const standbyDeckTrack = autoDJState.activeDeck === 'A' ? deckB.currentTrack : deckA.currentTrack;
+
+  const currentSong = useMemo(() => {
+    if (activeDeckTrack?.id) {
+      return songs.find((s) => s.id === activeDeckTrack.id) || activeDeckTrack;
     }
+    return basePlaylist[autoDJState.currentSongIndex] || basePlaylist[0];
+  }, [activeDeckTrack, songs, basePlaylist, autoDJState.currentSongIndex]);
 
-    return finalQueue;
-  }, [songsSignature, autoDJState.isEnabled, deckA.currentTrack?.id, deckB.currentTrack?.id, tiktokRequestCoinsBySongId]);
-
-  // Get dynamic queue - memoized to prevent excessive recalculations
-  const sortedSongs = useMemo(() => {
-    console.log('🔄 Recalculating Auto DJ queue...');
-    return createDynamicQueue();
-  }, [createDynamicQueue]);
-
-  // Debug logging for songs and bid clearing
-  console.log(`🎵 Auto DJ Hook - Raw songs: ${songs.length}, Dynamic queue: ${sortedSongs.length}`);
-
-  // Debug bid information in Auto DJ
-  const songsWithBids = songs.filter(song => song.currentBid && song.currentBid > 0);
-  console.log(`💰 Auto DJ: ${songsWithBids.length} songs with active bids`);
-
-  if (sortedSongs.length > 0) {
-    console.log(`🎵 Queue #1: "${sortedSongs[0]?.title}" (Bid: ${sortedSongs[0]?.currentBid || 0})`);
-    if (sortedSongs.length > 1) {
-      console.log(`🎵 Queue #2: "${sortedSongs[1]?.title}" (Bid: ${sortedSongs[1]?.currentBid || 0})`);
+  // Compute the logical Up Next song cleanly (always matches what standby deck should hold)
+  const nextSong = useMemo(() => {
+    if (!autoDJState.isEnabled) {
+      return basePlaylist[autoDJState.nextSongIndex] || basePlaylist[1] || basePlaylist[0];
     }
-    if (sortedSongs.length > 2) {
-      console.log(`🎵 Queue #3: "${sortedSongs[2]?.title}" (Bid: ${sortedSongs[2]?.currentBid || 0})`);
-    }
-  }
+    if (basePlaylist.length === 0) return undefined;
+    const picked = pickNextSong(currentSong, { coinsMap: tiktokRequestCoinsBySongId });
+    return picked.song || standbyDeckTrack || undefined;
+  }, [
+    autoDJState.isEnabled,
+    autoDJState.nextSongIndex,
+    basePlaylist,
+    currentSong,
+    pickNextSong,
+    standbyDeckTrack,
+    tiktokRequestCoinsBySongId,
+  ]);
 
-  // Helper function to safely trigger bid clearing
-  const triggerBidClearing = useCallback((song: Song, context: string) => {
-    if (!song || !song.id) return;
+  // Keep the regular-playlist cursor synced if the DJ manually loads/plays a regular track on the active deck
+  useEffect(() => {
+    if (!autoDJState.isEnabled || autoDJState.isTransitioning) return;
+    if (!activeDeckTrack?.id) return;
 
-    const trackingKey = `${song.id}-${Date.now()}`;
-
-    // Check if we've already triggered bid clearing for this song recently
-    if (bidClearingTrackerRef.current.has(song.id)) {
-      console.log(`⚠️ ${context}: Bid clearing already triggered for ${song.title}, skipping`);
+    // Never overwrite the regular cursor when the active track is (or entered as) a priority request
+    if (
+      currentPlayingPriorityTrackIdRef.current === activeDeckTrack.id ||
+      isPrioritySong(activeDeckTrack)
+    ) {
       return;
     }
 
-    // Only trigger if song has bids
-    if (song.currentBid && song.currentBid > 0) {
-      console.log(`💰 ${context}: Triggering bid clearing for: ${song.title} (Bid: ${song.currentBid})`);
-      bidClearingTrackerRef.current.add(song.id);
-      handleSongUpdate(song, 'play', 0);
-
-      // Remove from tracker after 50 seconds (after bid clearing would complete)
-      setTimeout(() => {
-        bidClearingTrackerRef.current.delete(song.id);
-        console.log(`🧹 Cleared tracking for: ${song.title}`);
-      }, 50000);
-    } else {
-      console.log(`ℹ️ ${context}: No bid to clear for ${song.title}`);
+    const idxInBase = basePlaylist.findIndex((s) => s.id === activeDeckTrack.id);
+    if (idxInBase >= 0 && lastRegularSongIdRef.current !== activeDeckTrack.id) {
+      lastRegularSongIdRef.current = activeDeckTrack.id;
+      lastRegularIndexRef.current = idxInBase;
     }
-  }, [handleSongUpdate]);
+  }, [autoDJState.isEnabled, autoDJState.isTransitioning, activeDeckTrack, basePlaylist, isPrioritySong]);
 
-  // Handle queue updates when new bids come in
+  // Helper function to safely trigger bid clearing
+  const triggerBidClearing = useCallback(
+    (song: Song, context: string) => {
+      if (!song || !song.id) return;
+
+      if (bidClearingTrackerRef.current.has(song.id)) {
+        console.log(`⚠️ ${context}: Bid clearing already triggered for ${song.title}, skipping`);
+        return;
+      }
+
+      const latestSong = songsRef.current.find((s) => s.id === song.id) || song;
+      if (latestSong.currentBid && latestSong.currentBid > 0) {
+        console.log(`💰 ${context}: Triggering bid clearing for: ${latestSong.title} (Bid: ${latestSong.currentBid})`);
+        bidClearingTrackerRef.current.add(latestSong.id);
+        handleSongUpdate(latestSong, 'play', 0);
+
+        setTimeout(() => {
+          bidClearingTrackerRef.current.delete(latestSong.id);
+        }, 50000);
+      }
+    },
+    [handleSongUpdate]
+  );
+
+  // Dynamically update the standby deck when new bids/requests arrive (or get cancelled/rejected)
   const handleQueueUpdate = useCallback(() => {
     if (!autoDJState.isEnabled || autoDJState.isTransitioning) return;
 
-    const currentPlayingSong = autoDJState.activeDeck === 'A' ? deckA.currentTrack : deckB.currentTrack;
-    const nextLoadedSong = autoDJState.activeDeck === 'A' ? deckB.currentTrack : deckA.currentTrack;
+    const currentPlayingSong =
+      autoDJState.activeDeck === 'A' ? deckARef.current.currentTrack : deckBRef.current.currentTrack;
+    const currentStandbySong =
+      autoDJState.activeDeck === 'A' ? deckBRef.current.currentTrack : deckARef.current.currentTrack;
 
     if (!currentPlayingSong) return;
 
-    // Find current song in new queue
-    const newCurrentIndex = sortedSongs.findIndex(song => song.id === currentPlayingSong.id);
-    if (newCurrentIndex === -1) return;
+    const picked = pickNextSong(currentPlayingSong);
+    const desiredNextSong = picked.song;
+    if (!desiredNextSong || desiredNextSong.id === currentPlayingSong.id) return;
 
-    // Check if next song has changed due to new bids
-    const newNextIndex = newCurrentIndex + 1 < sortedSongs.length ? newCurrentIndex + 1 : 0;
-    const newNextSong = sortedSongs[newNextIndex];
+    const currentBaseIndex = basePlaylistRef.current.findIndex((s) => s.id === currentPlayingSong.id);
+    const nextBaseIndex = picked.baseIndex >= 0 ? picked.baseIndex : 0;
 
-    // If next song changed and it's different from what's loaded (or inactive deck is empty)
-    if (newNextSong && newNextSong.id !== currentPlayingSong.id && newNextSong.id !== nextLoadedSong?.id) {
-      console.log(`🔄 QUEUE UPDATE DETECTED!`);
-      console.log(`📊 Old next: "${nextLoadedSong?.title || 'Empty'}" (${nextLoadedSong?.currentBid || 0})`);
-      console.log(`📊 New next: "${newNextSong.title}" (${newNextSong.currentBid || 0})`);
+    if (desiredNextSong.id !== currentStandbySong?.id) {
+      const inactiveDeck: 'A' | 'B' = autoDJState.activeDeck === 'A' ? 'B' : 'A';
+      console.log(
+        `🔄 QUEUE UPDATE: "${currentStandbySong?.title || 'Empty'}" → "${desiredNextSong.title}" (${
+          picked.isPriority ? 'PRIORITY REQUEST' : `Regular #${nextBaseIndex}`
+        }) on Deck ${inactiveDeck}`
+      );
+      scheduleStandbyLoad(inactiveDeck, desiredNextSong, 350);
 
-      // Load new next song to inactive deck
-      const inactiveDeck = autoDJState.activeDeck === 'A' ? 'B' : 'A';
-      console.log(`📀 Loading new next song "${newNextSong.title}" to Deck ${inactiveDeck}`);
-
-      setTimeout(() => {
-        if (inactiveDeck === 'A') {
-          loadTrackToDeckA(newNextSong);
-        } else {
-          loadTrackToDeckB(newNextSong);
-        }
-      }, 500);
-
-      // Update indices
-      setAutoDJState(prev => ({
+      setAutoDJState((prev) => ({
         ...prev,
-        currentSongIndex: newCurrentIndex,
-        nextSongIndex: newNextIndex
+        currentSongIndex: currentBaseIndex >= 0 ? currentBaseIndex : prev.currentSongIndex,
+        nextSongIndex: nextBaseIndex,
       }));
     }
-  }, [autoDJState.isEnabled, autoDJState.isTransitioning, autoDJState.activeDeck, deckA.currentTrack, deckB.currentTrack, sortedSongs, loadTrackToDeckA, loadTrackToDeckB]);
+  }, [autoDJState.isEnabled, autoDJState.isTransitioning, autoDJState.activeDeck, pickNextSong, scheduleStandbyLoad]);
 
-  // Monitor for queue changes (new bids) - optimized to only trigger on actual bid changes
+  // Monitor for queue changes (new bids, TikTok requests, or library updates)
   useEffect(() => {
     if (autoDJState.isEnabled && !autoDJState.isTransitioning) {
       handleQueueUpdate();
     }
-  }, [songsSignature, handleQueueUpdate]); // Only trigger when bid amounts actually change
+  }, [songsSignature, autoDJState.isEnabled, autoDJState.isTransitioning, handleQueueUpdate]);
 
-  // Get current and next songs from sorted list
-  const currentSong = sortedSongs[autoDJState.currentSongIndex];
-  const nextSong = sortedSongs[autoDJState.nextSongIndex];
-
-  // Debug current/next song selection
-  console.log(`🎵 Current Song Index: ${autoDJState.currentSongIndex}, Next Song Index: ${autoDJState.nextSongIndex}`);
-  console.log(`🎵 Current Song: "${currentSong?.title}" (Bid: ${currentSong?.currentBid || 0})`);
-  console.log(`🎵 Next Song: "${nextSong?.title}" (Bid: ${nextSong?.currentBid || 0})`);
-
-  // Calculate time remaining in current track - optimized dependencies
+  // Calculate time remaining in current track
   const getCurrentTrackTimeRemaining = useCallback(() => {
     const activeDeckData = autoDJState.activeDeck === 'A' ? deckA : deckB;
     if (!activeDeckData?.currentTrack || !activeDeckData?.duration || activeDeckData.duration === 0) {
@@ -275,133 +340,119 @@ export const useAutoDJ = ({
 
     const position = activeDeckData.position || 0;
     const duration = activeDeckData.duration;
-    const remaining = duration - position;
-
-    console.log(`⏱️ Deck ${autoDJState.activeDeck}: ${position.toFixed(1)}s / ${duration.toFixed(1)}s (${remaining.toFixed(1)}s remaining)`);
-
-    return Math.max(0, remaining);
+    return Math.max(0, duration - position);
   }, [deckA, deckB, autoDJState.activeDeck]);
 
   // Start Auto DJ
   const startAutoDJ = useCallback(() => {
-    console.log('🚀 AUTO DJ START FUNCTION CALLED');
-    console.log(`🔍 Available songs: ${songs.length}, Sorted songs: ${sortedSongs.length}`);
+    const playlist = basePlaylistRef.current;
+    console.log('🚀 AUTO DJ START FUNCTION CALLED', { count: playlist.length });
 
-    if (sortedSongs.length < 2) {
+    if (playlist.length < 2) {
       console.warn('❌ Need at least 2 songs for Auto DJ');
       alert('Need at least 2 songs in your library to use Auto DJ');
       return;
     }
 
-    // Check current playing state
-    const deckAPlaying = deckA.isPlaying;
-    const deckBPlaying = deckB.isPlaying;
-    const currentTrackA = deckA.currentTrack;
-    const currentTrackB = deckB.currentTrack;
+    const deckAPlaying = deckARef.current.isPlaying;
+    const deckBPlaying = deckBRef.current.isPlaying;
+    const currentTrackA = deckARef.current.currentTrack;
+    const currentTrackB = deckBRef.current.currentTrack;
 
-    console.log(`🔍 Current state - Deck A playing: ${deckAPlaying} (${currentTrackA?.title || 'None'}), Deck B playing: ${deckBPlaying} (${currentTrackB?.title || 'None'})`);
+    let activeDeck: 'A' | 'B' = 'A';
+    let currentPlayingSong: Song | null = null;
 
-    let activeDeck: 'A' | 'B';
-    let currentSongIndex: number;
-    let nextSongIndex: number;
-    let currentPlayingSong: any = null;
-
-    // Determine which deck is currently playing and find the song index
     if (deckAPlaying && currentTrackA) {
       activeDeck = 'A';
       currentPlayingSong = currentTrackA;
-      console.log(`🎵 Deck A is playing: "${currentTrackA.title}"`);
     } else if (deckBPlaying && currentTrackB) {
       activeDeck = 'B';
       currentPlayingSong = currentTrackB;
-      console.log(`🎵 Deck B is playing: "${currentTrackB.title}"`);
-    } else {
-      // No deck is playing, start from beginning
-      activeDeck = 'A';
-      currentSongIndex = 0;
-      nextSongIndex = 1;
-      console.log('🎵 No deck is playing, starting from beginning');
     }
 
-    // Find the current song index in sorted list
     if (currentPlayingSong) {
-      currentSongIndex = sortedSongs.findIndex(song => song.id === currentPlayingSong.id);
-      if (currentSongIndex === -1) {
-        console.log('⚠️ Current playing song not found in sorted list, starting from beginning');
-        currentSongIndex = 0;
-        nextSongIndex = 1;
+      const idx = playlist.findIndex((s) => s.id === currentPlayingSong!.id);
+      const startedOnPriority = isPrioritySong(currentPlayingSong);
+      if (startedOnPriority) {
+        currentPlayingPriorityTrackIdRef.current = currentPlayingSong.id;
+        // Preserve existing regular cursor if we already have one; otherwise leave at -1 so next regular is index 0
       } else {
-        nextSongIndex = (currentSongIndex + 1) % sortedSongs.length;
-        console.log(`🎯 Found current song at index ${currentSongIndex}, next song will be index ${nextSongIndex}`);
-        console.log(`🎵 Current: "${sortedSongs[currentSongIndex]?.title}", Next: "${sortedSongs[nextSongIndex]?.title}"`);
-      }
-    }
-
-    console.log('🎵 Starting Auto DJ with', sortedSongs.length, 'songs (sorted by bid priority)');
-    console.log(`🎯 Starting from index ${currentSongIndex}, next index ${nextSongIndex}`);
-
-    // Set crossfader to the active deck
-    const crossfaderPosition = activeDeck === 'A' ? 0 : 100;
-    console.log(`🎚️ Setting crossfader to ${crossfaderPosition}% (full Deck ${activeDeck})`);
-    updateCrossfader(crossfaderPosition);
-
-    // Load next song to the inactive deck
-    const inactiveDeck = activeDeck === 'A' ? 'B' : 'A';
-    const nextSong = sortedSongs[nextSongIndex];
-
-    if (nextSong) {
-      console.log(`📀 Loading next song "${nextSong.title}" (Bid: ${nextSong.currentBid || 0}) to Deck ${inactiveDeck}`);
-      setTimeout(() => {
-        if (inactiveDeck === 'A') {
-          loadTrackToDeckA(nextSong);
-        } else {
-          loadTrackToDeckB(nextSong);
+        currentPlayingPriorityTrackIdRef.current = null;
+        if (idx >= 0) {
+          lastRegularSongIdRef.current = currentPlayingSong.id;
+          lastRegularIndexRef.current = idx;
         }
-      }, 1000);
-    }
-
-    // Update state
-    setAutoDJState(prev => ({
-      ...prev,
-      isEnabled: true,
-      currentSongIndex,
-      nextSongIndex,
-      activeDeck,
-      isTransitioning: false,
-      transitionProgress: 0
-    }));
-
-    console.log(`🎛️ Auto DJ state updated - Active Deck: ${activeDeck}, Current Song Index: ${currentSongIndex}, Next Song Index: ${nextSongIndex}`);
-
-    // If no deck is playing, just load the first two songs to the decks, do NOT play anything
-    if (!deckAPlaying && !deckBPlaying) {
-      const firstSong = sortedSongs[currentSongIndex];
-      const nextSong = sortedSongs[nextSongIndex];
-      if (firstSong) {
-        console.log(`📀 Loading first song "${firstSong.title}" (Bid: ${firstSong.currentBid || 0}) to Deck A`);
-        loadTrackToDeckA(firstSong);
       }
-      if (nextSong) {
-        console.log(`📀 Loading next song "${nextSong.title}" (Bid: ${nextSong.currentBid || 0}) to Deck B`);
-        loadTrackToDeckB(nextSong);
+
+      const pickedNext = pickNextSong(currentPlayingSong);
+      const nextToLoad = pickedNext.song;
+      const inactiveDeck: 'A' | 'B' = activeDeck === 'A' ? 'B' : 'A';
+
+      updateCrossfader(activeDeck === 'A' ? 0 : 100);
+
+      if (nextToLoad) {
+        console.log(`📀 Loading next song "${nextToLoad.title}" to Deck ${inactiveDeck}`);
+        scheduleStandbyLoad(inactiveDeck, nextToLoad, 500);
       }
-      // Do NOT play or toggle any deck here. User must press play manually.
+
+      setAutoDJState((prev) => ({
+        ...prev,
+        isEnabled: true,
+        currentSongIndex: idx >= 0 ? idx : 0,
+        nextSongIndex: pickedNext.baseIndex >= 0 ? pickedNext.baseIndex : 0,
+        activeDeck,
+        isTransitioning: false,
+        transitionProgress: 0,
+      }));
       return;
     }
 
-  }, [sortedSongs, loadTrackToDeckA, loadTrackToDeckB, updateCrossfader, toggleDeckA, deckA, deckB, triggerBidClearing]);
+    // No deck is currently playing — load the highest-priority request (or index 0) to Deck A, and next to Deck B
+    lastRegularSongIdRef.current = null;
+    lastRegularIndexRef.current = -1;
+    const pickedFirst = pickNextSong(null);
+    const firstSong = pickedFirst.song || playlist[0];
+
+    if (pickedFirst.isPriority) {
+      currentPlayingPriorityTrackIdRef.current = firstSong.id;
+    } else {
+      currentPlayingPriorityTrackIdRef.current = null;
+      lastRegularSongIdRef.current = firstSong.id;
+      lastRegularIndexRef.current = pickedFirst.baseIndex >= 0 ? pickedFirst.baseIndex : 0;
+    }
+
+    const pickedSecond = pickNextSong(firstSong);
+    const secondSong = pickedSecond.song || playlist[1];
+
+    updateCrossfader(0);
+    if (firstSong) {
+      loadTrackToDeckA(firstSong);
+    }
+    if (secondSong) {
+      loadTrackToDeckB(secondSong);
+    }
+
+    setAutoDJState((prev) => ({
+      ...prev,
+      isEnabled: true,
+      currentSongIndex: pickedFirst.baseIndex >= 0 ? pickedFirst.baseIndex : 0,
+      nextSongIndex: pickedSecond.baseIndex >= 0 ? pickedSecond.baseIndex : 1,
+      activeDeck: 'A',
+      isTransitioning: false,
+      transitionProgress: 0,
+    }));
+  }, [isPrioritySong, pickNextSong, updateCrossfader, scheduleStandbyLoad, loadTrackToDeckA, loadTrackToDeckB]);
 
   // Stop Auto DJ
   const stopAutoDJ = useCallback(() => {
     console.log('🛑 Stopping Auto DJ');
 
-    setAutoDJState(prev => ({
+    setAutoDJState((prev) => ({
       ...prev,
       isEnabled: false,
-      isTransitioning: false
+      isTransitioning: false,
     }));
 
-    // Clear intervals
     if (transitionIntervalRef.current) {
       clearInterval(transitionIntervalRef.current);
       transitionIntervalRef.current = null;
@@ -410,221 +461,201 @@ export const useAutoDJ = ({
       clearInterval(monitorIntervalRef.current);
       monitorIntervalRef.current = null;
     }
+    if (pendingLoadTimeoutRef.current) {
+      clearTimeout(pendingLoadTimeoutRef.current);
+      pendingLoadTimeoutRef.current = null;
+    }
 
-    // Clear bid clearing tracker
     bidClearingTrackerRef.current.clear();
-    console.log('🧹 Cleared bid clearing tracker');
   }, []);
 
   // Start transition between decks
   const startTransition = useCallback(() => {
     if (autoDJState.isTransitioning) {
-      console.log('⚠️ Transition already in progress, skipping');
       return;
     }
 
-    const nextDeck = autoDJState.activeDeck === 'A' ? 'B' : 'A';
-    console.log(`🔄 Starting transition from Deck ${autoDJState.activeDeck} to Deck ${nextDeck}`);
+    const prevActiveDeck = autoDJState.activeDeck;
+    const nextDeck: 'A' | 'B' = prevActiveDeck === 'A' ? 'B' : 'A';
+    const nextDeckData = nextDeck === 'A' ? deckARef.current : deckBRef.current;
 
-    // Check if next deck has a track loaded
-    const nextDeckData = nextDeck === 'A' ? deckA : deckB;
     if (!nextDeckData?.currentTrack) {
       console.error(`❌ Cannot transition - Deck ${nextDeck} has no track loaded!`);
       return;
     }
 
-    setAutoDJState(prev => ({
+    const nextSongToPlay = nextDeckData.currentTrack;
+    // Snapshot whether the incoming track is a priority request BEFORE its bid/TikTok status is consumed
+    const incomingWasPriority = isPrioritySong(nextSongToPlay);
+    const incomingHadTikTokRequest = Boolean(tiktokCoinsRef.current?.[nextSongToPlay.id]);
+
+    console.log(
+      `🔄 Transition Deck ${prevActiveDeck} → Deck ${nextDeck}: "${nextSongToPlay.title}" (${
+        incomingWasPriority ? 'PRIORITY REQUEST' : 'REGULAR'
+      })`
+    );
+
+    setAutoDJState((prev) => ({
       ...prev,
       isTransitioning: true,
-      transitionProgress: 0
+      transitionProgress: 0,
     }));
 
     // Start playing the next deck immediately for seamless overlap
-    console.log(`▶️ Starting playback on Deck ${nextDeck} for seamless transition`);
-
-    // Get the actual next song that's loaded on the inactive deck
-    const nextSongToPlay = nextDeck === 'A' ? deckA.currentTrack : deckB.currentTrack;
-    console.log(`🎵 Next song to play: "${nextSongToPlay?.title}" (Bid: ${nextSongToPlay?.currentBid || 0})`);
-
-    // AI DJ Voice Announcement - Commented out for now
-    /*
-    if (nextSongToPlay) {
-      aiDJVoiceService.announceTrackTransition(nextSongToPlay);
-    }
-    */
-
-    if (nextDeck === 'B' && !deckB.isPlaying) {
-      toggleDeckB(); // Start immediately, no delay
-      console.log('🎵 BOTH DECKS NOW PLAYING - Seamless overlap during crossfade');
-
-      // Trigger bid clearing for the next song AFTER deck starts
+    if (nextDeck === 'B' && !deckBRef.current.isPlaying) {
+      toggleDeckB();
       setTimeout(() => {
-        if (nextSongToPlay && deckB.isPlaying) {
+        if (nextSongToPlay && deckBRef.current.isPlaying) {
           triggerBidClearing(nextSongToPlay, 'Auto DJ Transition to B');
         }
-      }, 1000); // Wait for deck to actually start
-
-    } else if (nextDeck === 'A' && !deckA.isPlaying) {
-      toggleDeckA(); // Start immediately, no delay
-      console.log('🎵 BOTH DECKS NOW PLAYING - Seamless overlap during crossfade');
-
-      // Trigger bid clearing for the next song AFTER deck starts
+      }, 1000);
+    } else if (nextDeck === 'A' && !deckARef.current.isPlaying) {
+      toggleDeckA();
       setTimeout(() => {
-        if (nextSongToPlay && deckA.isPlaying) {
+        if (nextSongToPlay && deckARef.current.isPlaying) {
           triggerBidClearing(nextSongToPlay, 'Auto DJ Transition to A');
         }
-      }, 1000); // Wait for deck to actually start
+      }, 1000);
     }
 
     // Animate crossfader
     const startCrossfader = crossfader;
-    const targetCrossfader = autoDJState.activeDeck === 'A' ? 100 : 0;
-    const crossfadeSteps = Math.max(20, autoDJState.crossfadeSpeed * 10); // Minimum 20 steps, 10 steps per second
+    const targetCrossfader = prevActiveDeck === 'A' ? 100 : 0;
+    const crossfadeSteps = Math.max(20, autoDJState.crossfadeSpeed * 10);
     let currentStep = 0;
-
-    console.log(`🎚️ Crossfading from ${startCrossfader}% to ${targetCrossfader}% over ${autoDJState.crossfadeSpeed}s`);
 
     transitionIntervalRef.current = setInterval(() => {
       currentStep++;
-      const progress = Math.min(currentStep / crossfadeSteps, 1); // Ensure we don't exceed 1
+      const progress = Math.min(currentStep / crossfadeSteps, 1);
 
       if (progress >= 1) {
-        // Transition complete
-        console.log('✅ Crossfade complete, finalizing transition...');
         updateCrossfader(targetCrossfader);
 
-        // Stop the previous deck immediately after crossfade completes
-        if (autoDJState.activeDeck === 'A') {
-          console.log('⏹️ Stopping Deck A (crossfade complete)');
+        // Stop the previous deck only if it is still playing (never accidentally unpause it)
+        if (prevActiveDeck === 'A' && deckARef.current.isPlaying) {
           toggleDeckA();
-        } else {
-          console.log('⏹️ Stopping Deck B (crossfade complete)');
+        } else if (prevActiveDeck === 'B' && deckBRef.current.isPlaying) {
           toggleDeckB();
         }
 
-        // Update state - move to next song in the sorted list
-        const newActiveDeck = autoDJState.activeDeck === 'A' ? 'B' : 'A';
-        const newCurrentIndex = autoDJState.nextSongIndex;
-        const newNextIndex = (autoDJState.nextSongIndex + 1) % sortedSongs.length;
+        const newActiveDeck = nextDeck;
+        const newStandbyDeck: 'A' | 'B' = newActiveDeck === 'A' ? 'B' : 'A';
+        const playlist = basePlaylistRef.current;
+        const playingBaseIndex = playlist.findIndex((s) => s.id === nextSongToPlay.id);
 
-        console.log(`🔄 Updating indices: Current ${autoDJState.currentSongIndex} → ${newCurrentIndex}, Next ${autoDJState.nextSongIndex} → ${newNextIndex}`);
-        console.log(`🎵 Now Current: "${sortedSongs[newCurrentIndex]?.title}", Next Up: "${sortedSongs[newNextIndex]?.title}"`);
+        // CRITICAL FIX: Only advance the regular-playlist cursor when playing a REGULAR track,
+        // OR when a requested track happened to be the exact next regular slot (so it won't replay right after).
+        // For any other PlayMyJam bid or TikTok request, keep `lastRegularSongIdRef` anchored at
+        // the last regular track (e.g. index 2) so playback resumes cleanly at index 3 next!
+        const currentAnchorIdx = lastRegularSongIdRef.current
+          ? playlist.findIndex((s) => s.id === lastRegularSongIdRef.current)
+          : lastRegularIndexRef.current;
+        const expectedNextRegularIdx =
+          playlist.length > 0 && currentAnchorIdx >= 0
+            ? (currentAnchorIdx + 1) % playlist.length
+            : -1;
 
-        setAutoDJState(prev => ({
+        if (incomingWasPriority && playingBaseIndex !== expectedNextRegularIdx) {
+          currentPlayingPriorityTrackIdRef.current = nextSongToPlay.id;
+        } else {
+          currentPlayingPriorityTrackIdRef.current = incomingWasPriority ? nextSongToPlay.id : null;
+          lastRegularSongIdRef.current = nextSongToPlay.id;
+          if (playingBaseIndex >= 0) {
+            lastRegularIndexRef.current = playingBaseIndex;
+          }
+        }
+
+        // Consume TikTok request right away so the next pick won't re-pick this same track
+        if (nextSongToPlay.id && incomingHadTikTokRequest) {
+          onConsumeTikTokRequestRef.current?.(nextSongToPlay.id, newActiveDeck);
+        }
+
+        // Pick the upcoming track using live refs (excluding the song that just became active)
+        const pickedUpcoming = pickNextSong(nextSongToPlay, {
+          excludeIds: [nextSongToPlay.id],
+        });
+        const upcomingSong = pickedUpcoming.song;
+
+        setAutoDJState((prev) => ({
           ...prev,
           activeDeck: newActiveDeck,
-          currentSongIndex: newCurrentIndex,
-          nextSongIndex: newNextIndex,
+          currentSongIndex: playingBaseIndex >= 0 ? playingBaseIndex : prev.currentSongIndex,
+          nextSongIndex: pickedUpcoming.baseIndex >= 0 ? pickedUpcoming.baseIndex : 0,
           isTransitioning: false,
-          transitionProgress: 100
+          transitionProgress: 100,
         }));
 
-        // Load next song to the now-empty deck immediately
-        const nextSongToLoad = sortedSongs[newNextIndex];
-        if (nextSongToLoad) {
-          console.log(`📀 Loading next song: "${nextSongToLoad.title}" (Bid: ${nextSongToLoad.currentBid || 0}) to Deck ${newActiveDeck === 'A' ? 'B' : 'A'}`);
-          setTimeout(() => {
-            if (newActiveDeck === 'A') {
-              loadTrackToDeckB(nextSongToLoad);
-            } else {
-              loadTrackToDeckA(nextSongToLoad);
-            }
-          }, 500); // Reduced delay for faster loading
+        if (upcomingSong) {
+          console.log(
+            `📀 Loading upcoming track "${upcomingSong.title}" (${
+              pickedUpcoming.isPriority ? 'PRIORITY REQUEST' : `Regular #${pickedUpcoming.baseIndex}`
+            }) to Deck ${newStandbyDeck}`
+          );
+          scheduleStandbyLoad(newStandbyDeck, upcomingSong, 450);
         }
-
-        if (nextSongToPlay?.id && tiktokRequestCoinsBySongId?.[nextSongToPlay.id]) {
-          onConsumeTikTokRequest?.(nextSongToPlay.id, newActiveDeck);
-        }
-
-        console.log(`✅ Transition complete. Now playing: "${sortedSongs[newCurrentIndex]?.title}" (Bid: ${sortedSongs[newCurrentIndex]?.currentBid || 0}) on Deck ${newActiveDeck}`);
 
         if (transitionIntervalRef.current) {
           clearInterval(transitionIntervalRef.current);
           transitionIntervalRef.current = null;
         }
       } else {
-        // Smooth crossfade
         const newCrossfaderValue = startCrossfader + (targetCrossfader - startCrossfader) * progress;
         updateCrossfader(Math.round(newCrossfaderValue));
 
-        setAutoDJState(prev => ({
+        setAutoDJState((prev) => ({
           ...prev,
-          transitionProgress: progress * 100
+          transitionProgress: progress * 100,
         }));
-
-        console.log(`🎚️ Crossfader: ${Math.round(newCrossfaderValue)}% (${Math.round(progress * 100)}% complete)`);
       }
-    }, 100); // Update every 100ms for smooth animation
-
-  }, [autoDJState, crossfader, deckA.isPlaying, deckB.isPlaying, toggleDeckA, toggleDeckB, updateCrossfader, sortedSongs, loadTrackToDeckA, loadTrackToDeckB, triggerBidClearing, tiktokRequestCoinsBySongId, onConsumeTikTokRequest]);
+    }, 100);
+  }, [
+    autoDJState.isTransitioning,
+    autoDJState.activeDeck,
+    autoDJState.crossfadeSpeed,
+    crossfader,
+    isPrioritySong,
+    toggleDeckA,
+    toggleDeckB,
+    triggerBidClearing,
+    updateCrossfader,
+    pickNextSong,
+    scheduleStandbyLoad,
+  ]);
 
   // Monitor track progress and trigger transitions
   useEffect(() => {
-    if (!autoDJState.isEnabled) {
-      console.log('🚫 Auto DJ monitoring stopped - not enabled');
+    if (!autoDJState.isEnabled || autoDJState.isTransitioning) {
       return;
     }
 
-    if (autoDJState.isTransitioning) {
-      console.log('🔄 Auto DJ monitoring paused - transition in progress');
-      return;
-    }
-
-    // GUARD: Only monitor if a deck is actually playing
     if (!deckA.isPlaying && !deckB.isPlaying) return;
 
-    console.log(`🎵 Auto DJ monitoring started for Deck ${autoDJState.activeDeck}`);
-    console.log(`🔍 Monitoring setup - Active Deck: ${autoDJState.activeDeck}, Current Song: ${autoDJState.currentSongIndex}, Next Song: ${autoDJState.nextSongIndex}`);
-
-    // Safety check - ensure we're monitoring the right deck
     if (autoDJState.activeDeck === 'A' && !deckA.isPlaying && deckB.isPlaying) {
-      console.log('🚨 SAFETY CHECK FAILED: Should monitor Deck A but Deck B is playing!');
-      console.log('🔧 Attempting to fix: stopping Deck B, starting Deck A');
-      toggleDeckB(); // Stop B
-      setTimeout(() => toggleDeckA(), 200); // Start A
-    } else if (autoDJState.activeDeck === 'B' && !deckB.isPlaying && deckA.isPlaying) {
-      console.log('🚨 SAFETY CHECK FAILED: Should monitor Deck B but Deck A is playing!');
+      toggleDeckB();
+      setTimeout(() => toggleDeckA(), 200);
     }
 
     monitorIntervalRef.current = setInterval(() => {
-      const timeRemaining = getCurrentTrackTimeRemaining();
-      const activeDeckData = autoDJState.activeDeck === 'A' ? deckA : deckB;
+      const activeDeckData = autoDJState.activeDeck === 'A' ? deckARef.current : deckBRef.current;
+      const duration = activeDeckData?.duration || 0;
+      const position = activeDeckData?.position || 0;
+      const timeRemaining = duration > 0 ? Math.max(0, duration - position) : 0;
 
-      // Monitor track progress and trigger transitions
-      if (activeDeckData?.currentTrack) {
-        const position = activeDeckData.position || 0;
-        const duration = activeDeckData.duration || 0;
-        const isPlaying = activeDeckData.isPlaying;
+      const hasValidDuration = Boolean(duration > 0);
+      const shouldTransition =
+        hasValidDuration && timeRemaining > 0 && timeRemaining <= autoDJState.transitionDuration;
+      const isEmergency =
+        hasValidDuration &&
+        timeRemaining <= 0 &&
+        Boolean(activeDeckData?.currentTrack) &&
+        !autoDJState.isTransitioning;
+      const isForceTransition =
+        hasValidDuration && timeRemaining > 0 && timeRemaining <= 3 && !autoDJState.isTransitioning;
 
-        // Log every 10 seconds to reduce console noise
-        if (Math.floor(position) % 10 === 0 && position > 0) {
-          console.log(`🔍 Auto DJ Monitor: Deck ${autoDJState.activeDeck} - "${activeDeckData.currentTrack.title}" | ${position.toFixed(1)}s/${duration.toFixed(1)}s | ${timeRemaining.toFixed(1)}s remaining`);
-        }
-      }
-
-      // Check transition conditions with detailed logging
-      const hasValidDuration = Boolean(activeDeckData?.duration && activeDeckData.duration > 0);
-      const shouldTransition = hasValidDuration && timeRemaining > 0 && timeRemaining <= autoDJState.transitionDuration;
-      const isEmergency = hasValidDuration && timeRemaining <= 0 && activeDeckData?.currentTrack && !autoDJState.isTransitioning;
-      const isForceTransition = hasValidDuration && timeRemaining > 0 && timeRemaining <= 3 && !autoDJState.isTransitioning;
-
-      // Debug transition conditions every check
-      if (timeRemaining <= 20) { // Only log when getting close to transition time
-        console.log(`🎯 TRANSITION CHECK: timeRemaining=${timeRemaining.toFixed(1)}s, threshold=${autoDJState.transitionDuration}s, shouldTransition=${shouldTransition}, isTransitioning=${autoDJState.isTransitioning}`);
-      }
-
-      if (shouldTransition) {
-        console.log(`🚨 TRANSITION CONDITION MET! ${timeRemaining.toFixed(1)}s <= ${autoDJState.transitionDuration}s`);
-        console.log(`⏰ STARTING TRANSITION NOW!`);
-        startTransition();
-      } else if (isEmergency) {
-        console.log('🚨 EMERGENCY TRANSITION! Track ended unexpectedly');
-        startTransition();
-      } else if (isForceTransition) {
-        console.log('🚨 FORCE TRANSITION! Less than 3 seconds remaining');
+      if (shouldTransition || isEmergency || isForceTransition) {
         startTransition();
       }
-    }, 250); // Check every 250ms for even more responsive monitoring
+    }, 250);
 
     return () => {
       if (monitorIntervalRef.current) {
@@ -632,37 +663,44 @@ export const useAutoDJ = ({
         monitorIntervalRef.current = null;
       }
     };
-  }, [autoDJState.isEnabled, autoDJState.isTransitioning, autoDJState.activeDeck, getCurrentTrackTimeRemaining, autoDJState.transitionDuration, startTransition, deckA, deckB]);
-
-
+  }, [
+    autoDJState.isEnabled,
+    autoDJState.isTransitioning,
+    autoDJState.activeDeck,
+    autoDJState.transitionDuration,
+    startTransition,
+    deckA.isPlaying,
+    deckB.isPlaying,
+    toggleDeckA,
+    toggleDeckB,
+  ]);
 
   // --- Robust 45s Play Timer for Bid Clearing ---
   useEffect(() => {
     if (!autoDJState.isEnabled) return;
     const activeDeckData = autoDJState.activeDeck === 'A' ? deckA : deckB;
-    const currentSong = sortedSongs[autoDJState.currentSongIndex];
-    if (!activeDeckData?.currentTrack || !currentSong) return;
+    const activeTrack = activeDeckData?.currentTrack;
+    if (!activeTrack?.id) return;
 
-    // Only run for songs with a bid
-    if (!currentSong.currentBid || currentSong.currentBid <= 0) return;
+    const liveSong = songs.find((s) => s.id === activeTrack.id) || activeTrack;
+    if (!liveSong.currentBid || liveSong.currentBid <= 0) return;
 
-    // Track play time for this song
-    if (bidClearedRef.current !== currentSong.id) {
+    if (bidClearedRef.current !== liveSong.id) {
       playbackTimeRef.current = 0;
       bidClearedRef.current = null;
     }
 
-    // Clear any previous interval
     if (playbackIntervalRef.current) {
       clearInterval(playbackIntervalRef.current);
     }
 
     playbackIntervalRef.current = setInterval(() => {
-      if (activeDeckData.isPlaying) {
+      const latestDeck = autoDJState.activeDeck === 'A' ? deckARef.current : deckBRef.current;
+      if (latestDeck.isPlaying) {
         playbackTimeRef.current += 1;
-        if (playbackTimeRef.current >= 45 && bidClearedRef.current !== currentSong.id) {
-          triggerBidClearing(currentSong, '45s Play Timer');
-          bidClearedRef.current = currentSong.id;
+        if (playbackTimeRef.current >= 45 && bidClearedRef.current !== liveSong.id) {
+          triggerBidClearing(liveSong, '45s Play Timer');
+          bidClearedRef.current = liveSong.id;
         }
       }
     }, 1000);
@@ -673,7 +711,14 @@ export const useAutoDJ = ({
         playbackIntervalRef.current = null;
       }
     };
-  }, [autoDJState.isEnabled, autoDJState.activeDeck, deckA.currentTrack, deckB.currentTrack, sortedSongs, autoDJState.currentSongIndex, deckA.isPlaying, deckB.isPlaying]);
+  }, [
+    autoDJState.isEnabled,
+    autoDJState.activeDeck,
+    deckA,
+    deckB,
+    songs,
+    triggerBidClearing,
+  ]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -684,29 +729,31 @@ export const useAutoDJ = ({
       if (monitorIntervalRef.current) {
         clearInterval(monitorIntervalRef.current);
       }
+      if (pendingLoadTimeoutRef.current) {
+        clearTimeout(pendingLoadTimeoutRef.current);
+      }
+      if (playbackIntervalRef.current) {
+        clearInterval(playbackIntervalRef.current);
+      }
     };
   }, []);
 
-  // Skip to next song manually
   const skipToNext = useCallback(() => {
     if (!autoDJState.isEnabled) return;
-    
-    console.log('⏭️ Manual skip to next song');
     startTransition();
   }, [autoDJState.isEnabled, startTransition]);
 
-  // Update transition settings
   const updateTransitionDuration = useCallback((seconds: number) => {
-    setAutoDJState(prev => ({
+    setAutoDJState((prev) => ({
       ...prev,
-      transitionDuration: Math.max(5, Math.min(30, seconds)) // Between 5-30 seconds
+      transitionDuration: Math.max(5, Math.min(30, seconds)),
     }));
   }, []);
 
   const updateCrossfadeSpeed = useCallback((seconds: number) => {
-    setAutoDJState(prev => ({
+    setAutoDJState((prev) => ({
       ...prev,
-      crossfadeSpeed: Math.max(2, Math.min(15, seconds)) // Between 2-15 seconds
+      crossfadeSpeed: Math.max(2, Math.min(15, seconds)),
     }));
   }, []);
 
@@ -719,8 +766,6 @@ export const useAutoDJ = ({
     skipToNext,
     updateTransitionDuration,
     updateCrossfadeSpeed,
-    timeRemaining: getCurrentTrackTimeRemaining()
+    timeRemaining: getCurrentTrackTimeRemaining(),
   };
 };
-
-// NOTE: If Deck B still plays automatically, check your Deck B component and audio element for any autoPlay attribute or .play() call on load. Deck B should only play when toggleDeckB() is called during a transition.

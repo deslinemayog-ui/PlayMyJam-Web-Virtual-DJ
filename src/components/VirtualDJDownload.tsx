@@ -6,7 +6,7 @@ import { Link } from 'react-router-dom';
 
 const VirtualDJDownload = () => {
   const macDownloadUrl = 'https://github.com/mickytroxxy/jam-lounge-genesis/releases/download/v1.0.0/PlayMyJam-1.0.0-arm64.dmg';
-  const winDownloadUrl = 'https://github.com/mickytroxxy/jam-lounge-genesis/releases/download/v1.0.0/PlayMyJam-Setup-1.0.0.exe';
+  const winDownloadUrl = 'https://github.com/mrcapabledev-dot/project-releases/releases/download/1.00/PlayMyJam.exe';
 
   const features = [
     'Professional 2-Deck Mixing',
@@ -100,7 +100,7 @@ const VirtualDJDownload = () => {
                   <div className="flex-1 h-1 rounded-full bg-white/10 overflow-hidden">
                     <div className="h-full w-0 group-hover:w-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-500 ease-out rounded-full" />
                   </div>
-                  <span className="text-xs text-gray-500">PlayMyJam.Setup.0.0.0.exe</span>
+                  <span className="text-xs text-gray-500">PlayMyJam.exe</span>
                 </div>
               </div>
             </a>
