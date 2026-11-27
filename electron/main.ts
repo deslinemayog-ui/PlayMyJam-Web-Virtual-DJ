@@ -1,4 +1,4 @@
-import { app, BrowserWindow, protocol, ipcMain, net } from 'electron';
+import { app, BrowserWindow, protocol, ipcMain, net, session } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { pathToFileURL, fileURLToPath } from 'url';
@@ -8,6 +8,9 @@ import { TikTokLiveManager } from './tiktokLiveManager';
 const { autoUpdater } = electronUpdater;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Allow Pioneer MIDI controllers to start deck playback immediately without requiring a mouse click first
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 let mainWindow: BrowserWindow | null = null;
 const tiktokManager = new TikTokLiveManager(() => mainWindow?.webContents ?? null);
@@ -71,6 +74,22 @@ function scanDirectory(dir: string, maxDepth: number = 15): string[] {
 }
 
 app.whenReady().then(() => {
+  // Auto-grant Web MIDI, SysEx, and audio output/device selection permissions for Pioneer DJ controllers & CDJs
+  const allowedHardwarePermissions = new Set([
+    'midi',
+    'midiSysex',
+    'media',
+    'audioCapture',
+    'speaker-selection',
+    'hid',
+  ]);
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(allowedHardwarePermissions.has(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => {
+    return allowedHardwarePermissions.has(permission);
+  });
+
   protocol.handle('local', (request) => {
     let filePath = request.url.replace('local://', '');
     if (process.platform === 'win32') {
@@ -84,6 +103,89 @@ app.whenReady().then(() => {
     const musicDir = app.getPath('music');
     return scanDirectory(musicDir);
   });
+
+  // Save a remote track directly into the user's Downloads folder
+  ipcMain.handle(
+    'download-track',
+    async (_event, payload: { url: string; fileName?: string }) => {
+      try {
+        const rawUrl = typeof payload?.url === 'string' ? payload.url.trim() : '';
+        if (!/^https?:\/\//i.test(rawUrl)) {
+          return { success: false, error: 'Invalid track download URL.' };
+        }
+
+        const response = await net.fetch(rawUrl);
+        if (!response.ok) {
+          return { success: false, error: `Download failed (HTTP ${response.status}).` };
+        }
+
+        const contentType = (response.headers.get('content-type') || '').toLowerCase();
+        const inferExt = (): string => {
+          if (contentType.includes('wav')) return '.wav';
+          if (contentType.includes('flac')) return '.flac';
+          if (contentType.includes('ogg')) return '.ogg';
+          if (contentType.includes('mp4') || contentType.includes('m4a') || contentType.includes('aac')) {
+            return '.m4a';
+          }
+          if (contentType.includes('webm')) return '.webm';
+          try {
+            const urlPath = decodeURIComponent(new URL(rawUrl).pathname);
+            const urlExtMatch = urlPath.match(/\.(mp3|wav|m4a|aac|flac|ogg|opus|webm)$/i);
+            if (urlExtMatch) return urlExtMatch[0].toLowerCase();
+          } catch {
+            // fallback to .mp3
+          }
+          return '.mp3';
+        };
+
+        const rawName = path.basename(
+          typeof payload?.fileName === 'string' && payload.fileName.trim()
+            ? payload.fileName.trim()
+            : 'PlayMyJam Track.mp3'
+        );
+        // Strip characters disallowed on Windows/macOS/Linux filesystems and ASCII control chars
+        let safeName = Array.from(rawName)
+          .map((ch) => (ch.charCodeAt(0) < 32 ? ' ' : ch))
+          .join('')
+          .replace(/[<>:"/\\|?*]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .replace(/^[.\s]+|[.\s]+$/g, '')
+          .slice(0, 160);
+
+        if (!safeName) {
+          safeName = 'PlayMyJam Track';
+        }
+        if (!/\.(mp3|wav|m4a|aac|flac|ogg|opus|webm)$/i.test(safeName)) {
+          safeName = `${safeName}${inferExt()}`;
+        }
+
+        const downloadsDir = app.getPath('downloads');
+        await fs.promises.mkdir(downloadsDir, { recursive: true });
+
+        const ext = path.extname(safeName);
+        const stem = path.basename(safeName, ext);
+        let finalFileName = safeName;
+        let filePath = path.join(downloadsDir, finalFileName);
+        let counter = 1;
+        while (fs.existsSync(filePath) && counter < 1000) {
+          finalFileName = `${stem} (${counter})${ext}`;
+          filePath = path.join(downloadsDir, finalFileName);
+          counter += 1;
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await fs.promises.writeFile(filePath, buffer);
+
+        return { success: true, filePath, fileName: finalFileName };
+      } catch (err) {
+        console.error('[DownloadTrack] Failed to download track:', err);
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to save song to Downloads.',
+        };
+      }
+    }
+  );
 
   // File-based persistent storage for redux-persist
   const storageFile = path.join(app.getPath('userData'), 'playmyjam-store.json');

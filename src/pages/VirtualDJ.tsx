@@ -3,6 +3,7 @@ import { useMusicPlayer } from '@/hooks/useMusicPlayer';
 import { useAudioLogic } from '@/hooks/useAudioLogic';
 import { useAutoDJ } from '@/hooks/useAutoDJ';
 import { useTikTokLive } from '@/hooks/useTikTokLive';
+import { usePioneerController } from '@/hooks/usePioneerController';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '@/store';
@@ -16,6 +17,7 @@ import DeckB from '@/components/virtualDJ/DeckB';
 import MixerPanel from '@/components/virtualDJ/MixerPanel';
 import MusicLibrary from '@/components/virtualDJ/MusicLibrary';
 import TikTokLiveModal from '@/components/virtualDJ/TikTokLiveModal';
+import PioneerHardwareModal from '@/components/virtualDJ/PioneerHardwareModal';
 // import AirDJHUD from '@/components/virtualDJ/AirDJHUD';
 import { getSecretKeys } from '@/api';
 import { setSecrets } from '@/store/slices/globalVariables';
@@ -90,6 +92,28 @@ const VirtualDJ = () => {
 
     // Sound Effects
     playSoundEffect,
+
+    // Pioneer Hardware Jog, Pitch, Headphone Cue (PFL) & Multi-Channel Audio Routing
+    nudgeDeckA,
+    nudgeDeckB,
+    setDeckAPitch,
+    setDeckBPitch,
+    deckACueEnabled,
+    deckBCueEnabled,
+    toggleDeckACue,
+    toggleDeckBCue,
+    cueVolume,
+    updateCueVolume,
+    audioRoutingMode,
+    setAudioRoutingMode,
+    audioOutputDevices,
+    masterOutputDeviceId,
+    cueOutputDeviceId,
+    setMasterOutputDevice,
+    setCueOutputDevice,
+    refreshAudioDevices,
+    maxOutputChannels,
+    audioRoutingError,
   } = useMusicPlayer();
 
   // Audio logic for song status updates
@@ -102,6 +126,8 @@ const VirtualDJ = () => {
   // TikTok Live Gifts & Chats modal state
   const [showTikTokModal, setShowTikTokModal] = useState(false);
   const [isTikTokModalCollapsed, setIsTikTokModalCollapsed] = useState(false);
+  // Pioneer DJ / MIDI Hardware modal state
+  const [showHardwareModal, setShowHardwareModal] = useState(false);
 
   const handleOpenTikTokModal = () => {
     setShowTikTokModal(true);
@@ -285,6 +311,110 @@ const VirtualDJ = () => {
     onConsumeTikTokRequest: tiktokLive.consumeSongRequest,
   });
 
+  // Load the top priority TikTok/PlayMyJam track onto a deck (triggered by Pioneer Load A / Load B buttons)
+  const loadTopQueueTrackToDeck = useCallback(
+    (deck: 'A' | 'B') => {
+      const otherTrackId = deck === 'A' ? deckB?.currentTrack?.id : deckA?.currentTrack?.id;
+      const currentTrackId = deck === 'A' ? deckA?.currentTrack?.id : deckB?.currentTrack?.id;
+      const library = djSongs || [];
+      const fallbackDistinct =
+        library.find((s) => s.id !== otherTrackId && s.id !== currentTrackId) ||
+        library.find((s) => s.id !== otherTrackId) ||
+        library[0] ||
+        null;
+
+      const candidate =
+        (tiktokLive.nextQueuedRequest?.song &&
+        tiktokLive.nextQueuedRequest.song.id !== otherTrackId
+          ? tiktokLive.nextQueuedRequest.song
+          : null) ||
+        (autoDJ.nextSong && autoDJ.nextSong.id !== otherTrackId ? autoDJ.nextSong : null) ||
+        fallbackDistinct;
+
+      if (!candidate) return;
+      if (deck === 'A') {
+        loadTrackToDeckA(candidate);
+      } else {
+        loadTrackToDeckB(candidate);
+      }
+      if (tiktokLive.nextQueuedRequest?.song?.id === candidate.id) {
+        tiktokLive.markSongRequestLoaded(candidate.id, deck);
+      }
+    },
+    [
+      deckA?.currentTrack?.id,
+      deckB?.currentTrack?.id,
+      tiktokLive,
+      autoDJ.nextSong,
+      djSongs,
+      loadTrackToDeckA,
+      loadTrackToDeckB,
+    ]
+  );
+
+  // Pioneer DJ USB Controllers & Club CDJ (MIDI Mode) Integration
+  const pioneerController = usePioneerController(
+    {
+      toggleDeckA: () => void enhancedToggleDeckA(),
+      cueDeckA: () => {
+        if (deckA?.isPlaying) {
+          pauseDeckA();
+          jumpToDeckACue?.();
+        } else {
+          setDeckACuePoint?.(deckA?.position || 0);
+        }
+      },
+      toggleSyncA: () => (isSynced ? unsyncBPM() : syncBPM()),
+      togglePflA: toggleDeckACue,
+      setDeckAVolume: updateDeckAVolume,
+      setDeckAEQ: updateDeckAEQ,
+      setDeckAPitch,
+      nudgeDeckA,
+      loopInDeckA: () => setDeckALoopIn?.(deckA?.position || 0),
+      loopOutDeckA: () => setDeckALoopOut?.(deckA?.position || 0),
+      loopToggleDeckA: () => toggleDeckALoop?.(),
+      beatJumpDeckA: (beats) => beatJumpDeckA?.(beats),
+      toggleEchoDeckA: toggleDeckAEcho,
+      toggleReverbDeckA: toggleDeckAReverb,
+      loadNextToDeckA: () => loadTopQueueTrackToDeck('A'),
+
+      toggleDeckB: () => void enhancedToggleDeckB(),
+      cueDeckB: () => {
+        if (deckB?.isPlaying) {
+          pauseDeckB();
+          jumpToDeckBCue?.();
+        } else {
+          setDeckBCuePoint?.(deckB?.position || 0);
+        }
+      },
+      toggleSyncB: () => (isSynced ? unsyncBPM() : syncBPM()),
+      togglePflB: toggleDeckBCue,
+      setDeckBVolume: updateDeckBVolume,
+      setDeckBEQ: updateDeckBEQ,
+      setDeckBPitch,
+      nudgeDeckB,
+      loopInDeckB: () => setDeckBLoopIn?.(deckB?.position || 0),
+      loopOutDeckB: () => setDeckBLoopOut?.(deckB?.position || 0),
+      loopToggleDeckB: () => toggleDeckBLoop?.(),
+      beatJumpDeckB: (beats) => beatJumpDeckB?.(beats),
+      toggleEchoDeckB: toggleDeckBEcho,
+      toggleReverbDeckB: toggleDeckBReverb,
+      loadNextToDeckB: () => loadTopQueueTrackToDeck('B'),
+
+      setCrossfader: updateCrossfader,
+      setMasterVolume: updateMasterVolume,
+      setCueVolume: updateCueVolume,
+      playSoundEffect,
+    },
+    {
+      deckAPlaying: Boolean(deckA?.isPlaying),
+      deckBPlaying: Boolean(deckB?.isPlaying),
+      deckACueEnabled,
+      deckBCueEnabled,
+      isSynced: Boolean(isSynced),
+    }
+  );
+
   // When Auto DJ is OFF and a deck finishes a track naturally, play the next queued TikTok request if Auto-Play is enabled
   const prevDeckPlayingRef = useRef({ a: false, b: false });
   useEffect(() => {
@@ -356,6 +486,9 @@ const VirtualDJ = () => {
             isTikTokConnected={tiktokLive.isConnected}
             tiktokViewerCount={tiktokLive.viewerCount}
             onOpenTikTokModal={handleOpenTikTokModal}
+            isHardwareConnected={pioneerController.isHardwareConnected}
+            hardwareDeviceName={pioneerController.primaryDevice?.name}
+            onOpenHardwareModal={() => setShowHardwareModal(true)}
             autoDJState={autoDJ.autoDJState}
             currentSong={autoDJ.currentSong}
             nextSong={autoDJ.nextSong}
@@ -468,6 +601,31 @@ const VirtualDJ = () => {
           onPlaySongNow={(song) => playTikTokSongNow(song)}
           onLoadToDeckA={loadTrackToDeckA}
           onLoadToDeckB={loadTrackToDeckB}
+        />
+
+        {/* Pioneer DJ & MIDI Hardware + 4-Ch Audio / Headphone Cue Modal */}
+        <PioneerHardwareModal
+          isOpen={showHardwareModal}
+          onClose={() => setShowHardwareModal(false)}
+          controller={pioneerController}
+          audio={{
+            routingMode: audioRoutingMode,
+            setRoutingMode: setAudioRoutingMode,
+            outputDevices: audioOutputDevices,
+            masterDeviceId: masterOutputDeviceId,
+            cueDeviceId: cueOutputDeviceId,
+            setMasterDevice: setMasterOutputDevice,
+            setCueDevice: setCueOutputDevice,
+            refreshDevices: refreshAudioDevices,
+            maxOutputChannels,
+            routingError: audioRoutingError,
+            deckACueEnabled,
+            deckBCueEnabled,
+            toggleDeckACue,
+            toggleDeckBCue,
+            cueVolume,
+            updateCueVolume,
+          }}
         />
       </div>
     </>

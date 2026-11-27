@@ -50,9 +50,9 @@ const HotCuePads: React.FC<HotCuePadsProps> = ({
 
   return (
     <div className="w-full">
-      <div className="flex items-center justify-between mb-1.5">
+      <div className="flex items-center justify-between mb-1">
         <span className="text-[10px] text-gray-400 font-semibold uppercase tracking-widest">Hot Cues</span>
-        <span className="text-[9px] text-gray-600">⌘+click to clear</span>
+        <span className="text-[9px] text-gray-500">⌘+click to clear</span>
       </div>
       <div className="grid grid-cols-4 gap-1">
         {Array.from({ length: 8 }).map((_, i) => {
@@ -67,7 +67,7 @@ const HotCuePads: React.FC<HotCuePadsProps> = ({
               disabled={isDisabled}
               title={isSet ? `Jump to ${formatTime(position!)} (⌘+click to clear)` : `Set Hot Cue ${i + 1}`}
               className={`
-                relative h-10 rounded flex flex-col items-center justify-center
+                relative h-8 rounded flex flex-col items-center justify-center
                 transition-all duration-100 select-none
                 ${isSet
                   ? 'opacity-100 shadow-lg scale-100 active:scale-95'

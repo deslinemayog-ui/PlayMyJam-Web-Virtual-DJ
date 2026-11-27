@@ -5,6 +5,7 @@ PROJECT_ID="sublime-calling-507411-e0"
 REGIONS=("africa-south1" "europe-west1")
 SERVICE_NAME="play-server"
 SECRET_NAME="ytdlp-cookies"
+STATE_BUCKET="play-server-ytdlp-state-371330410186"
 
 if [ $# -lt 1 ]; then
   echo "Usage: ./play/upload-cookies.sh path/to/cookies.txt"
@@ -65,13 +66,16 @@ gcloud secrets versions add "$SECRET_NAME" \
   --data-file="$TMP_NETSCAPE" \
   --project="$PROJECT_ID"
 
+# Clear any older rotated state in GCS so the fresh secret takes effect immediately
+gcloud storage rm "gs://$STATE_BUCKET/ytdlp-cookies.json" --project="$PROJECT_ID" --quiet 2>/dev/null || true
+
 UPDATED_AT="$(date +%s)"
 for REGION in "${REGIONS[@]}"; do
   echo "Refreshing Cloud Run service ($SERVICE_NAME in $REGION) so new instances pick up the latest cookies..."
   gcloud run services update "$SERVICE_NAME" \
     --project="$PROJECT_ID" \
     --region="$REGION" \
-    --update-env-vars="YTDLP_COOKIES_UPDATED_AT=$UPDATED_AT" \
+    --update-env-vars="YTDLP_COOKIES_UPDATED_AT=$UPDATED_AT,YTDLP_COOKIES_STATE_BUCKET=$STATE_BUCKET" \
     --quiet
 done
 

@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { useAppSelector } from '@/store/hooks';
 import { getAISongsByOwner } from '@/api';
 import { Song } from '@/Types';
+import TrackDownloadButton from '@/components/virtualDJ/TrackDownloadButton';
 
 interface AIMusicTabProps {
   loadTrackToDeckA: (song: Song) => void;
@@ -348,6 +349,12 @@ const AIMusicTab: React.FC<AIMusicTabProps> = ({ loadTrackToDeckA, loadTrackToDe
                         B
                       </button>
                     </div>
+
+                    <TrackDownloadButton
+                      song={toSong(song)}
+                      variant="compact"
+                      className="opacity-75 group-hover:opacity-100"
+                    />
                   </div>
                 </div>
               </div>

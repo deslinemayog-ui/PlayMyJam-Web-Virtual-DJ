@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '@/store/hooks';
 import { useAuth } from '@/contexts/AuthContext';
 import { getDJSongs, getDJSongsOptimized } from '@/api';
@@ -68,10 +68,66 @@ const toSafeNumber = (value: unknown, fallback: number, min = 0, max = 100): num
   return Number.isFinite(num) ? Math.max(min, Math.min(max, num)) : fallback;
 };
 
+export type AudioRoutingMode = 'stereo' | 'controller_4ch' | 'dual_device' | 'external_mixer';
+
+export interface AudioOutputDeviceInfo {
+  deviceId: string;
+  label: string;
+  isPioneer: boolean;
+}
+
+const AUDIO_SETTINGS_KEY = 'playmyjam_pioneer_audio_v1';
+
+interface SavedAudioSettings {
+  routingMode: AudioRoutingMode;
+  masterDeviceId: string;
+  cueDeviceId: string;
+  cueVolume: number;
+}
+
+function loadSavedAudioSettings(): SavedAudioSettings {
+  try {
+    const raw = localStorage.getItem(AUDIO_SETTINGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const validModes: AudioRoutingMode[] = ['stereo', 'controller_4ch', 'dual_device', 'external_mixer'];
+      return {
+        routingMode: validModes.includes(parsed.routingMode) ? parsed.routingMode : 'stereo',
+        masterDeviceId: typeof parsed.masterDeviceId === 'string' ? parsed.masterDeviceId : 'default',
+        cueDeviceId: typeof parsed.cueDeviceId === 'string' ? parsed.cueDeviceId : 'default',
+        cueVolume: toSafeNumber(parsed.cueVolume, 80),
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return {
+    routingMode: 'stereo',
+    masterDeviceId: 'default',
+    cueDeviceId: 'default',
+    cueVolume: 80,
+  };
+}
+
 export const useMusicPlayer = () => {
   const dispatch = useAppDispatch();
   const { user, isAuthenticated } = useAuth();
   const musicPlayerState = useAppSelector((state) => state.musicPlayer);
+
+  // Pioneer / Pro Audio Routing & Headphone Cue (PFL) state
+  const [audioSettings, setAudioSettings] = useState<SavedAudioSettings>(() => loadSavedAudioSettings());
+  const [audioOutputDevices, setAudioOutputDevices] = useState<AudioOutputDeviceInfo[]>([]);
+  const [maxOutputChannels, setMaxOutputChannels] = useState<number>(2);
+  const [deckACueEnabled, setDeckACueEnabled] = useState<boolean>(false);
+  const [deckBCueEnabled, setDeckBCueEnabled] = useState<boolean>(false);
+  const [audioRoutingError, setAudioRoutingError] = useState<string | null>(null);
+
+  const audioRoutingModeRef = useRef<AudioRoutingMode>(audioSettings.routingMode);
+  const deckACueEnabledRef = useRef<boolean>(false);
+  const deckBCueEnabledRef = useRef<boolean>(false);
+  const cueVolumeRef = useRef<number>(audioSettings.cueVolume);
+  const deckABaseBpmRef = useRef<number>(musicPlayerState?.bpmA ?? 128);
+  const deckBBaseBpmRef = useRef<number>(musicPlayerState?.bpmB ?? 128);
 
   // Refs mirroring mixer volumes & EQ for clean Web Audio gain staging without stale state
   const deckAVolumeRef = useRef<number>(toSafeNumber(musicPlayerState?.deckA?.volume, 75));
@@ -106,6 +162,14 @@ export const useMusicPlayer = () => {
   const deckAAnalyserRef = useRef<AnalyserNode | null>(null);
   const deckBAnalyserRef = useRef<AnalyserNode | null>(null);
   const masterGainRef = useRef<GainNode | null>(null);
+  const deckAPreFaderRef = useRef<GainNode | null>(null);
+  const deckBPreFaderRef = useRef<GainNode | null>(null);
+  const deckACueGainRef = useRef<GainNode | null>(null);
+  const deckBCueGainRef = useRef<GainNode | null>(null);
+  const cueBusGainRef = useRef<GainNode | null>(null);
+  const outputMergerRef = useRef<ChannelMergerNode | null>(null);
+  const cueStreamDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const cueAudioElRef = useRef<HTMLAudioElement | null>(null);
   const sfxBufferCacheRef = useRef<Map<string, AudioBuffer>>(new Map());
 
   // EQ nodes for Deck A
@@ -265,15 +329,28 @@ export const useMusicPlayer = () => {
       });
     }
 
-    // Initialize master gain eagerly
+    // Initialize master & headphone cue (PFL) buses eagerly
     const initializeMasterBus = () => {
       if (!audioContextRef.current || masterGainRef.current) return;
 
       const ctx = audioContextRef.current;
       masterGainRef.current = ctx.createGain();
       masterGainRef.current.gain.value = toSafeNumber(masterVolumeRef.current, 75) / 100;
+
+      cueBusGainRef.current = ctx.createGain();
+      cueBusGainRef.current.gain.value = toSafeNumber(cueVolumeRef.current, 80) / 100;
+
+      deckACueGainRef.current = ctx.createGain();
+      deckACueGainRef.current.gain.value = deckACueEnabledRef.current ? 1 : 0;
+      deckACueGainRef.current.connect(cueBusGainRef.current);
+
+      deckBCueGainRef.current = ctx.createGain();
+      deckBCueGainRef.current.gain.value = deckBCueEnabledRef.current ? 1 : 0;
+      deckBCueGainRef.current.connect(cueBusGainRef.current);
+
       masterGainRef.current.connect(ctx.destination);
-      console.log('🎛️ Master gain node initialized');
+      setMaxOutputChannels(ctx.destination.maxChannelCount || 2);
+      console.log('🎛️ Master + Headphone Cue (PFL) buses initialized (maxChannels=' + (ctx.destination.maxChannelCount || 2) + ')');
     };
 
     initializeMasterBus();
@@ -324,6 +401,19 @@ export const useMusicPlayer = () => {
       deckBConvolverRef.current = null;
       deckATimeUpdateRef.current = null;
       deckBTimeUpdateRef.current = null;
+      deckAPreFaderRef.current = null;
+      deckBPreFaderRef.current = null;
+      deckACueGainRef.current = null;
+      deckBCueGainRef.current = null;
+      cueBusGainRef.current = null;
+      outputMergerRef.current = null;
+      cueStreamDestRef.current = null;
+      if (cueAudioElRef.current) {
+        cueAudioElRef.current.pause();
+        cueAudioElRef.current.srcObject = null;
+        cueAudioElRef.current.remove();
+        cueAudioElRef.current = null;
+      }
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(() => {});
         audioContextRef.current = null;
@@ -523,11 +613,30 @@ export const useMusicPlayer = () => {
       delayMix.connect(deckAConvolverRef.current);
       deckAConvolverRef.current.connect(reverbWet);
 
-      // Mix reverb signals -> deck gain -> shared analyser -> master output
-      reverbDry.connect(deckAGainRef.current);
-      reverbWet.connect(deckAGainRef.current);
+      // Mix reverb signals -> pre-fader tap (for Headphone Cue PFL & External Club Mixer) -> deck gain -> analyser -> master
+      const preFaderA = ctx.createGain();
+      preFaderA.gain.value = 1;
+      deckAPreFaderRef.current = preFaderA;
+      reverbDry.connect(preFaderA);
+      reverbWet.connect(preFaderA);
+      preFaderA.connect(deckAGainRef.current);
+      if (deckACueGainRef.current && deckACueGainRef.current.context === ctx) {
+        preFaderA.connect(deckACueGainRef.current);
+      }
       deckAGainRef.current.connect(deckAAnalyserRef.current);
       deckAAnalyserRef.current.connect(masterGainRef.current);
+
+      // Re-apply external_mixer routing if active
+      if (audioRoutingModeRef.current === 'external_mixer' && outputMergerRef.current) {
+        try {
+          const splitA = ctx.createChannelSplitter(2);
+          preFaderA.connect(splitA);
+          splitA.connect(outputMergerRef.current, 0, 0);
+          splitA.connect(outputMergerRef.current, 1, 1);
+        } catch {
+          // ignore splitter fallback
+        }
+      }
 
       // Store references for effect controls
       (deckADelayRef.current as any).wetGain = delayWet;
@@ -587,6 +696,10 @@ export const useMusicPlayer = () => {
 
           // Set BPM from song data or estimate based on title/duration
           const estimatedBPM = estimateBPMFromSong(song);
+          deckABaseBpmRef.current = estimatedBPM;
+          if (deckAAudioRef.current) {
+            deckAAudioRef.current.playbackRate = 1;
+          }
           dispatch(setBPMA(estimatedBPM));
           console.log(`🎵 Deck A BPM set to: ${estimatedBPM}`);
 
@@ -829,11 +942,30 @@ export const useMusicPlayer = () => {
       delayMix.connect(deckBConvolverRef.current);
       deckBConvolverRef.current.connect(reverbWet);
 
-      // Mix reverb signals -> deck gain -> shared analyser -> master output
-      reverbDry.connect(deckBGainRef.current);
-      reverbWet.connect(deckBGainRef.current);
+      // Mix reverb signals -> pre-fader tap (for Headphone Cue PFL & External Club Mixer) -> deck gain -> analyser -> master
+      const preFaderB = ctx.createGain();
+      preFaderB.gain.value = 1;
+      deckBPreFaderRef.current = preFaderB;
+      reverbDry.connect(preFaderB);
+      reverbWet.connect(preFaderB);
+      preFaderB.connect(deckBGainRef.current);
+      if (deckBCueGainRef.current && deckBCueGainRef.current.context === ctx) {
+        preFaderB.connect(deckBCueGainRef.current);
+      }
       deckBGainRef.current.connect(deckBAnalyserRef.current);
       deckBAnalyserRef.current.connect(masterGainRef.current);
+
+      // Re-apply external_mixer routing if active
+      if (audioRoutingModeRef.current === 'external_mixer' && outputMergerRef.current) {
+        try {
+          const splitB = ctx.createChannelSplitter(2);
+          preFaderB.connect(splitB);
+          splitB.connect(outputMergerRef.current, 0, 2);
+          splitB.connect(outputMergerRef.current, 1, 3);
+        } catch {
+          // ignore splitter fallback
+        }
+      }
 
       // Store references for effect controls
       (deckBDelayRef.current as any).wetGain = delayWet;
@@ -889,6 +1021,10 @@ export const useMusicPlayer = () => {
 
           // Set BPM from song data or estimate based on title/duration
           const estimatedBPM = estimateBPMFromSong(song);
+          deckBBaseBpmRef.current = estimatedBPM;
+          if (deckBAudioRef.current) {
+            deckBAudioRef.current.playbackRate = 1;
+          }
           dispatch(setBPMB(estimatedBPM));
           console.log(`🎵 Deck B BPM set to: ${estimatedBPM}`);
 
@@ -1596,15 +1732,13 @@ export const useMusicPlayer = () => {
 
   const jumpToDeckACue = useCallback(() => {
     if (deckAAudioRef.current) {
-      const cuePoint = parseFloat(deckAAudioRef.current.dataset.cuePoint || '0');
-      if (cuePoint) {
-        deckAAudioRef.current.currentTime = cuePoint;
-        console.log(`🎯 Deck A: Jumped to cue point at ${cuePoint.toFixed(2)}s`);
-      } else {
-        console.warn('❌ Deck A: No cue point set');
-      }
+      const parsed = parseFloat(deckAAudioRef.current.dataset.cuePoint || '0');
+      const cuePoint = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      deckAAudioRef.current.currentTime = cuePoint;
+      dispatch(setDeckAPosition(cuePoint));
+      console.log(`🎯 Deck A: Jumped to cue point at ${cuePoint.toFixed(2)}s`);
     }
-  }, []);
+  }, [dispatch]);
 
   // Loop and Cue functionality for Deck B
   const setDeckBLoopIn = useCallback((position: number) => {
@@ -1660,15 +1794,13 @@ export const useMusicPlayer = () => {
 
   const jumpToDeckBCue = useCallback(() => {
     if (deckBAudioRef.current) {
-      const cuePoint = parseFloat(deckBAudioRef.current.dataset.cuePoint || '0');
-      if (cuePoint) {
-        deckBAudioRef.current.currentTime = cuePoint;
-        console.log(`🎯 Deck B: Jumped to cue point at ${cuePoint.toFixed(2)}s`);
-      } else {
-        console.warn('❌ Deck B: No cue point set');
-      }
+      const parsed = parseFloat(deckBAudioRef.current.dataset.cuePoint || '0');
+      const cuePoint = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      deckBAudioRef.current.currentTime = cuePoint;
+      dispatch(setDeckBPosition(cuePoint));
+      console.log(`🎯 Deck B: Jumped to cue point at ${cuePoint.toFixed(2)}s`);
     }
-  }, []);
+  }, [dispatch]);
 
   // Beat Jump functionality
   const beatJumpDeckA = useCallback((beats: number) => {
@@ -1694,6 +1826,307 @@ export const useMusicPlayer = () => {
       console.log(`⏭️ Deck B Beat Jump: ${beats > 0 ? '+' : ''}${beats} beats (${jumpTime.toFixed(2)}s) to ${newTime.toFixed(2)}s`);
     }
   }, [musicPlayerState.bpmB]);
+
+  // --- Pioneer Hardware Controls: Jog Wheel Nudge/Seek, Tempo/Pitch, Headphone Cue (PFL) & Multi-Channel Output ---
+  const nudgeDeckA = useCallback((deltaSeconds: number) => {
+    const audio = deckAAudioRef.current;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    const next = Math.max(0, Math.min(audio.duration - 0.1, audio.currentTime + deltaSeconds));
+    audio.currentTime = next;
+    dispatch(setDeckAPosition(next));
+  }, [dispatch]);
+
+  const nudgeDeckB = useCallback((deltaSeconds: number) => {
+    const audio = deckBAudioRef.current;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    const next = Math.max(0, Math.min(audio.duration - 0.1, audio.currentTime + deltaSeconds));
+    audio.currentTime = next;
+    dispatch(setDeckBPosition(next));
+  }, [dispatch]);
+
+  const setDeckAPitch = useCallback((percent: number) => {
+    const clamped = Math.max(-16, Math.min(16, Number.isFinite(percent) ? percent : 0));
+    const rate = 1 + clamped / 100;
+    if (deckAAudioRef.current) {
+      deckAAudioRef.current.playbackRate = rate;
+    }
+    const baseBpm = deckABaseBpmRef.current || 128;
+    dispatch(setBPMA(Math.round(baseBpm * rate * 10) / 10));
+  }, [dispatch]);
+
+  const setDeckBPitch = useCallback((percent: number) => {
+    const clamped = Math.max(-16, Math.min(16, Number.isFinite(percent) ? percent : 0));
+    const rate = 1 + clamped / 100;
+    if (deckBAudioRef.current) {
+      deckBAudioRef.current.playbackRate = rate;
+    }
+    const baseBpm = deckBBaseBpmRef.current || 128;
+    dispatch(setBPMB(Math.round(baseBpm * rate * 10) / 10));
+  }, [dispatch]);
+
+  const toggleDeckACue = useCallback(() => {
+    setDeckACueEnabled((prev) => {
+      const next = !prev;
+      deckACueEnabledRef.current = next;
+      const ctx = audioContextRef.current;
+      if (deckACueGainRef.current && ctx && ctx.state !== 'closed') {
+        deckACueGainRef.current.gain.setTargetAtTime(next ? 1 : 0, ctx.currentTime, 0.01);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleDeckBCue = useCallback(() => {
+    setDeckBCueEnabled((prev) => {
+      const next = !prev;
+      deckBCueEnabledRef.current = next;
+      const ctx = audioContextRef.current;
+      if (deckBCueGainRef.current && ctx && ctx.state !== 'closed') {
+        deckBCueGainRef.current.gain.setTargetAtTime(next ? 1 : 0, ctx.currentTime, 0.01);
+      }
+      return next;
+    });
+  }, []);
+
+  const persistAudioSettings = useCallback((next: SavedAudioSettings) => {
+    try {
+      localStorage.setItem(AUDIO_SETTINGS_KEY, JSON.stringify(next));
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const updateCueVolume = useCallback((volume: number) => {
+    const safe = toSafeNumber(volume, 80);
+    cueVolumeRef.current = safe;
+    const ctx = audioContextRef.current;
+    if (cueBusGainRef.current && ctx && ctx.state !== 'closed') {
+      cueBusGainRef.current.gain.setTargetAtTime(safe / 100, ctx.currentTime, 0.015);
+    }
+    setAudioSettings((prev) => {
+      const next = { ...prev, cueVolume: safe };
+      persistAudioSettings(next);
+      return next;
+    });
+  }, [persistAudioSettings]);
+
+  const refreshAudioDevices = useCallback(async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) {
+      return [];
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs: AudioOutputDeviceInfo[] = devices
+        .filter((d) => d.kind === 'audiooutput')
+        .map((d, idx) => {
+          const label = d.label || (d.deviceId === 'default' ? 'System Default Output' : `Audio Output ${idx + 1}`);
+          return {
+            deviceId: d.deviceId,
+            label,
+            isPioneer: /pioneer|alphatheta|ddj|xdj|cdj|djm|opus|omnis/i.test(label),
+          };
+        });
+      setAudioOutputDevices(outputs);
+      return outputs;
+    } catch (err) {
+      console.warn('[PioneerAudio] Could not enumerate audio outputs:', err);
+      return [];
+    }
+  }, []);
+
+  // Rewire Web Audio output graph cleanly for stereo / Pioneer 4ch controller / dual-device / club external DJM mixer
+  const applyAudioRoutingGraph = useCallback(async (settings: SavedAudioSettings) => {
+    const ctx = audioContextRef.current;
+    const masterGain = masterGainRef.current;
+    const cueBus = cueBusGainRef.current;
+    if (!ctx || ctx.state === 'closed' || !masterGain || !cueBus) return;
+
+    audioRoutingModeRef.current = settings.routingMode;
+    setAudioRoutingError(null);
+
+    // 1. Route AudioContext sink to selected Master / Pioneer audio interface (if supported by Electron/Chromium)
+    const ctxWithSink = ctx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+    if (typeof ctxWithSink.setSinkId === 'function') {
+      try {
+        const sinkId = settings.masterDeviceId === 'default' ? '' : settings.masterDeviceId;
+        await ctxWithSink.setSinkId(sinkId);
+      } catch (err) {
+        console.warn('[PioneerAudio] setSinkId failed for master output:', err);
+        setAudioRoutingError('Could not switch Master audio device. Ensure the Pioneer controller is connected and powered on.');
+      }
+    }
+
+    const availableChannels = ctx.destination.maxChannelCount || 2;
+    setMaxOutputChannels(availableChannels);
+
+    // 2. Cleanly disconnect previous output connections
+    try { masterGain.disconnect(); } catch { /* ignore */ }
+    try { cueBus.disconnect(); } catch { /* ignore */ }
+    if (outputMergerRef.current) {
+      try { outputMergerRef.current.disconnect(); } catch { /* ignore */ }
+      outputMergerRef.current = null;
+    }
+    if (cueAudioElRef.current) {
+      cueAudioElRef.current.pause();
+    }
+
+    // 3. Connect according to selected mode
+    if (settings.routingMode === 'controller_4ch') {
+      if (availableChannels >= 4) {
+        try {
+          ctx.destination.channelCountMode = 'explicit';
+          ctx.destination.channelInterpretation = 'discrete';
+          ctx.destination.channelCount = 4;
+
+          const merger = ctx.createChannelMerger(4);
+          const masterSplit = ctx.createChannelSplitter(2);
+          const cueSplit = ctx.createChannelSplitter(2);
+
+          masterGain.connect(masterSplit);
+          masterSplit.connect(merger, 0, 0); // Master L -> Ch 1
+          masterSplit.connect(merger, 1, 1); // Master R -> Ch 2
+
+          cueBus.connect(cueSplit);
+          cueSplit.connect(merger, 0, 2); // Headphones L -> Ch 3
+          cueSplit.connect(merger, 1, 3); // Headphones R -> Ch 4
+
+          merger.connect(ctx.destination);
+          outputMergerRef.current = merger;
+          console.log('🎧 Pioneer 4-Channel Routing Active: Master (Ch 1-2) + Headphone Cue (Ch 3-4)');
+          return;
+        } catch (err) {
+          console.warn('[PioneerAudio] 4ch controller routing failed, falling back to stereo:', err);
+          setAudioRoutingError('Selected device did not accept 4-channel mode. Falling back to Stereo.');
+        }
+      } else {
+        setAudioRoutingError(
+          `Selected output only exposes ${availableChannels} channels. Pick your Pioneer USB controller (4ch) or use Dual-Device Headphone Mode.`
+        );
+      }
+    } else if (settings.routingMode === 'external_mixer') {
+      if (availableChannels >= 4) {
+        try {
+          ctx.destination.channelCountMode = 'explicit';
+          ctx.destination.channelInterpretation = 'discrete';
+          ctx.destination.channelCount = 4;
+
+          const merger = ctx.createChannelMerger(4);
+          if (deckAPreFaderRef.current) {
+            const splitA = ctx.createChannelSplitter(2);
+            deckAPreFaderRef.current.connect(splitA);
+            splitA.connect(merger, 0, 0); // Deck A L -> DJM Ch 1 L
+            splitA.connect(merger, 1, 1); // Deck A R -> DJM Ch 1 R
+          }
+          if (deckBPreFaderRef.current) {
+            const splitB = ctx.createChannelSplitter(2);
+            deckBPreFaderRef.current.connect(splitB);
+            splitB.connect(merger, 0, 2); // Deck B L -> DJM Ch 2 L
+            splitB.connect(merger, 1, 3); // Deck B R -> DJM Ch 2 R
+          }
+          merger.connect(ctx.destination);
+          outputMergerRef.current = merger;
+          console.log('🎛️ External Club Mixer Routing Active: Deck A (Ch 1-2) / Deck B (Ch 3-4)');
+          return;
+        } catch (err) {
+          console.warn('[PioneerAudio] External mixer routing failed:', err);
+          setAudioRoutingError('External mixer 4-channel setup failed. Falling back to Stereo.');
+        }
+      } else {
+        setAudioRoutingError(
+          `External Club Mixer mode requires a 4+ channel USB mixer (e.g., DJM-900NXS2 / DJM-A9). Current device reports ${availableChannels}ch.`
+        );
+      }
+    } else if (settings.routingMode === 'dual_device') {
+      // Master -> primary device; Cue -> second audio output (e.g., USB headphones) via MediaStreamAudioDestinationNode
+      ctx.destination.channelCount = Math.min(2, availableChannels);
+      masterGain.connect(ctx.destination);
+
+      try {
+        if (!cueStreamDestRef.current || cueStreamDestRef.current.context !== ctx) {
+          cueStreamDestRef.current = ctx.createMediaStreamDestination();
+        }
+        cueBus.connect(cueStreamDestRef.current);
+
+        if (!cueAudioElRef.current) {
+          const el = new Audio();
+          el.style.display = 'none';
+          document.body.appendChild(el);
+          cueAudioElRef.current = el;
+        }
+        cueAudioElRef.current.srcObject = cueStreamDestRef.current.stream;
+        const elWithSink = cueAudioElRef.current as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+        if (typeof elWithSink.setSinkId === 'function' && settings.cueDeviceId) {
+          await elWithSink.setSinkId(settings.cueDeviceId === 'default' ? '' : settings.cueDeviceId);
+        }
+        await cueAudioElRef.current.play().catch(() => {});
+        console.log('🎧 Dual-Device Headphone Cue Routing Active');
+        return;
+      } catch (err) {
+        console.warn('[PioneerAudio] Dual-device cue setup failed:', err);
+        setAudioRoutingError('Could not route Headphone Cue to the selected secondary audio device.');
+        return;
+      }
+    }
+
+    // Standard Stereo fallback
+    try {
+      ctx.destination.channelCountMode = 'max';
+      ctx.destination.channelInterpretation = 'speakers';
+      ctx.destination.channelCount = Math.min(2, availableChannels);
+    } catch {
+      // ignore
+    }
+    masterGain.connect(ctx.destination);
+  }, []);
+
+  const setAudioRoutingMode = useCallback((mode: AudioRoutingMode) => {
+    setAudioSettings((prev) => {
+      const next = { ...prev, routingMode: mode };
+      persistAudioSettings(next);
+      void applyAudioRoutingGraph(next);
+      return next;
+    });
+  }, [persistAudioSettings, applyAudioRoutingGraph]);
+
+  const setMasterOutputDevice = useCallback((deviceId: string) => {
+    setAudioSettings((prev) => {
+      const next = { ...prev, masterDeviceId: deviceId };
+      persistAudioSettings(next);
+      void applyAudioRoutingGraph(next);
+      return next;
+    });
+  }, [persistAudioSettings, applyAudioRoutingGraph]);
+
+  const setCueOutputDevice = useCallback((deviceId: string) => {
+    setAudioSettings((prev) => {
+      const next = { ...prev, cueDeviceId: deviceId };
+      persistAudioSettings(next);
+      void applyAudioRoutingGraph(next);
+      return next;
+    });
+  }, [persistAudioSettings, applyAudioRoutingGraph]);
+
+  // Enumerate outputs on mount & watch USB plug/unplug events
+  useEffect(() => {
+    void refreshAudioDevices();
+    const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+    if (!md?.addEventListener) return;
+    const onDeviceChange = () => {
+      void refreshAudioDevices();
+    };
+    md.addEventListener('devicechange', onDeviceChange);
+    return () => {
+      md.removeEventListener('devicechange', onDeviceChange);
+    };
+  }, [refreshAudioDevices]);
+
+  // Apply persisted routing mode once AudioContext is initialized
+  useEffect(() => {
+    if (audioSettings.routingMode !== 'stereo' || audioSettings.masterDeviceId !== 'default') {
+      void applyAudioRoutingGraph(audioSettings);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Ensure we have a valid state object
   if (!musicPlayerState || typeof musicPlayerState !== 'object') {
@@ -1743,6 +2176,26 @@ export const useMusicPlayer = () => {
       toggleDeckAReverb: () => {},
       toggleDeckBReverb: () => {},
       resetLoadingStates: () => {},
+      nudgeDeckA: () => {},
+      nudgeDeckB: () => {},
+      setDeckAPitch: () => {},
+      setDeckBPitch: () => {},
+      deckACueEnabled: false,
+      deckBCueEnabled: false,
+      toggleDeckACue: () => {},
+      toggleDeckBCue: () => {},
+      cueVolume: 80,
+      updateCueVolume: () => {},
+      audioRoutingMode: 'stereo' as AudioRoutingMode,
+      setAudioRoutingMode: () => {},
+      audioOutputDevices: [] as AudioOutputDeviceInfo[],
+      masterOutputDeviceId: 'default',
+      cueOutputDeviceId: 'default',
+      setMasterOutputDevice: () => {},
+      setCueOutputDevice: () => {},
+      refreshAudioDevices: async () => [] as AudioOutputDeviceInfo[],
+      maxOutputChannels: 2,
+      audioRoutingError: null as string | null,
     };
   }
 
@@ -1829,6 +2282,28 @@ export const useMusicPlayer = () => {
     setDeckBCuePoint,
     jumpToDeckBCue,
     beatJumpDeckB,
+
+    // Pioneer Hardware Jog, Pitch, Headphone Cue (PFL) & Multi-Channel Audio Routing
+    nudgeDeckA,
+    nudgeDeckB,
+    setDeckAPitch,
+    setDeckBPitch,
+    deckACueEnabled,
+    deckBCueEnabled,
+    toggleDeckACue,
+    toggleDeckBCue,
+    cueVolume: audioSettings.cueVolume,
+    updateCueVolume,
+    audioRoutingMode: audioSettings.routingMode,
+    setAudioRoutingMode,
+    audioOutputDevices,
+    masterOutputDeviceId: audioSettings.masterDeviceId,
+    cueOutputDeviceId: audioSettings.cueDeviceId,
+    setMasterOutputDevice,
+    setCueOutputDevice,
+    refreshAudioDevices,
+    maxOutputChannels,
+    audioRoutingError,
 
     // Debug/utility functions
     resetLoadingStates,

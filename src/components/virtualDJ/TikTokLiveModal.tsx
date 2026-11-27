@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import type { Song } from '@/Types';
 import type { TikTokGiftSfxType, useTikTokLive } from '@/hooks/useTikTokLive';
+import TrackDownloadButton from '@/components/virtualDJ/TrackDownloadButton';
 
 const GIFT_SFX_OPTIONS: Array<{ value: TikTokGiftSfxType; label: string }> = [
   { value: 'laser', label: 'Laser' },
@@ -947,6 +948,7 @@ const TikTokLiveModal: React.FC<TikTokLiveModalProps> = ({
                                 >
                                   B
                                 </button>
+                                <TrackDownloadButton song={req.song} variant="solid" />
                                 {!isPlayed ? (
                                   <button
                                     type="button"

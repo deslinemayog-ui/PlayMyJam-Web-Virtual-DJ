@@ -128,7 +128,7 @@ const DeckA: React.FC<DeckAProps> = ({
 
       visualizerData.forEach((amplitude, index) => {
         const angle = index * angleStep - Math.PI / 2; // Start from top
-        const barHeight = amplitude * 30; // Scale the bar height
+        const barHeight = amplitude * 22; // Scale the bar height
 
         // Calculate positions
         const innerRadius = radius - 5;
@@ -173,7 +173,7 @@ const DeckA: React.FC<DeckAProps> = ({
     }
 
     // Draw loop and cue indicators as small dots around the circle
-    const indicatorRadius = radius + 35;
+    const indicatorRadius = radius + 16;
 
     if (loopIn !== null && deckA.duration > 0) {
       const progress = loopIn / deckA.duration;
@@ -356,87 +356,97 @@ const DeckA: React.FC<DeckAProps> = ({
   };
 
   return (
-    <DiscoLights isPlaying={deckA.isPlaying} deckId="A" enabled={discoLightsEnabled}>
-      <div 
-        className="glass-card p-4 animate-fade-in-up font-montserrat-light transition-colors hover:border-purple-500/50 border border-transparent"
+    <DiscoLights isPlaying={deckA.isPlaying} deckId="A" enabled={discoLightsEnabled} className="h-full">
+      <div
+        className="glass-card min-h-full p-3.5 animate-fade-in-up font-montserrat-light transition-colors hover:border-purple-500/50 border border-transparent flex flex-col justify-between gap-2"
         onDragOver={handleDragOver}
         onDrop={handleDrop}
       >
-      <div className="flex items-center gap-3 mb-8">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center">
-          <Disc className="w-4 h-4 text-white animate-spin" style={{animationDuration: deckA.isPlaying ? '2s' : '0s'}} />
-        </div>
-        <h2 className="text-xl font-montserrat-bold text-white">Deck A</h2>
-      </div>
-
-      {/* Vinyl with Music Visualizer */}
-      <div className="relative mb-8 flex items-center justify-center">
-        {/* Music Visualizer Canvas - positioned behind vinyl */}
-        <canvas
-          ref={canvasRef}
-          width={180}
-          height={180}
-          className="absolute w-45 h-45 pointer-events-none"
-          style={{ zIndex: 1 }}
-        />
-
-        {/* Vinyl Simulation - positioned on top of visualizer with scratching */}
-        <div
-          ref={vinylRef}
-          className={`relative w-32 h-32 bg-gradient-to-br from-gray-800 to-black rounded-full border-2 ${
-            isScratching ? 'border-red-500' : 'border-purple-400/30'
-          } flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors`}
-          style={{ zIndex: 2 }}
-          onMouseDown={handleVinylMouseDown}
-          onMouseMove={handleVinylMouseMove}
-          onMouseUp={handleVinylMouseUp}
-        >
-          <div className={`w-28 h-28 bg-gradient-to-br from-purple-600 to-purple-800 rounded-full flex items-center justify-center p-2 ${
-            deckA.isPlaying && !isScratching ? 'animate-spin' : ''
-          }`} style={{animationDuration: '3s'}}>
-            {deckA.currentTrack?.albumArt ? (
-              <img src={deckA.currentTrack.albumArt} alt="Album Art" className="w-full h-full rounded-full object-cover" />
-            ) : (
-              <Music className="w-6 h-6 text-white" />
-            )}
+        {/* Deck Header */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-purple-500 to-purple-700 flex items-center justify-center">
+              <Disc className="w-4 h-4 text-white animate-spin" style={{ animationDuration: deckA.isPlaying ? '2s' : '0s' }} />
+            </div>
+            <h2 className="text-base font-montserrat-bold text-white">Deck A</h2>
           </div>
-
-          {/* Scratch indicator */}
-          {isScratching && (
-            <div className="absolute inset-0 rounded-full border-2 border-red-500 animate-pulse" />
+          {bpmA > 0 && (
+            <span className="text-[11px] font-montserrat-bold text-purple-300 bg-purple-500/15 border border-purple-500/30 rounded px-2 py-0.5 tabular-nums">
+              {Math.round(bpmA)} BPM
+            </span>
           )}
         </div>
-      </div>
 
-      {/* Waveform Display */}
-      <div className="mb-3">
-        <WaveformDisplay
-          audioUrl={deckA.currentTrack?.audioUrl || deckA.currentTrack?.url}
-          position={deckA.position || 0}
-          duration={deckA.duration || 0}
-          isPlaying={deckA.isPlaying}
-          color="#a855f7"
-          hotCues={hotCues}
-          hotCueColors={HOT_CUE_COLORS}
-          loopIn={loopIn}
-          loopOut={loopOut}
-          onSeek={(pos) => {
-            // Seek via audio element if accessible
-            const audio = document.querySelector('#deckA-audio') as HTMLAudioElement;
-            if (audio) audio.currentTime = pos;
-          }}
-        />
-      </div>
+        {/* Vinyl with Music Visualizer */}
+        <div className="relative py-1 flex items-center justify-center">
+          {/* Music Visualizer Canvas - positioned behind vinyl */}
+          <canvas
+            ref={canvasRef}
+            width={144}
+            height={144}
+            className="absolute w-36 h-36 pointer-events-none"
+            style={{ zIndex: 1 }}
+          />
 
-      {/* Track Info */}
-      <div className="bg-gradient-to-r from-purple-500/20 to-transparent rounded-lg px-3 py-2 mb-3">
-        <p className="text-gray-300 text-xs truncate">
-          {deckA.currentTrack ? `${deckA.currentTrack.artist} - ${deckA.currentTrack.title}` : 'Drop a track or select from library'}
-        </p>
-      </div>
+          {/* Vinyl Simulation - positioned on top of visualizer with scratching */}
+          <div
+            ref={vinylRef}
+            className={`relative w-24 h-24 bg-gradient-to-br from-gray-800 to-black rounded-full border-2 ${
+              isScratching ? 'border-red-500' : 'border-purple-400/30'
+            } flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors`}
+            style={{ zIndex: 2 }}
+            onMouseDown={handleVinylMouseDown}
+            onMouseMove={handleVinylMouseMove}
+            onMouseUp={handleVinylMouseUp}
+          >
+            <div
+              className={`w-20 h-20 bg-gradient-to-br from-purple-600 to-purple-800 rounded-full flex items-center justify-center p-1.5 ${
+                deckA.isPlaying && !isScratching ? 'animate-spin' : ''
+              }`}
+              style={{ animationDuration: '3s' }}
+            >
+              {deckA.currentTrack?.albumArt ? (
+                <img src={deckA.currentTrack.albumArt} alt="Album Art" className="w-full h-full rounded-full object-cover" />
+              ) : (
+                <Music className="w-5 h-5 text-white" />
+              )}
+            </div>
 
-      {/* Hot Cues */}
-      <div className="mb-3">
+            {/* Scratch indicator */}
+            {isScratching && (
+              <div className="absolute inset-0 rounded-full border-2 border-red-500 animate-pulse" />
+            )}
+          </div>
+        </div>
+
+        {/* Waveform Display + Track Info */}
+        <div className="space-y-1.5">
+          <WaveformDisplay
+            audioUrl={deckA.currentTrack?.audioUrl || deckA.currentTrack?.url}
+            position={deckA.position || 0}
+            duration={deckA.duration || 0}
+            isPlaying={deckA.isPlaying}
+            color="#a855f7"
+            height={46}
+            hotCues={hotCues}
+            hotCueColors={HOT_CUE_COLORS}
+            loopIn={loopIn}
+            loopOut={loopOut}
+            onSeek={(pos) => {
+              // Seek via audio element if accessible
+              const audio = document.querySelector('#deckA-audio') as HTMLAudioElement;
+              if (audio) audio.currentTime = pos;
+            }}
+          />
+
+          <div className="bg-gradient-to-r from-purple-500/20 to-transparent rounded-lg px-2.5 py-1.5">
+            <p className="text-gray-300 text-xs truncate">
+              {deckA.currentTrack ? `${deckA.currentTrack.artist} - ${deckA.currentTrack.title}` : 'Drop a track or select from library'}
+            </p>
+          </div>
+        </div>
+
+        {/* Hot Cues */}
         <HotCuePads
           hotCues={hotCues}
           currentPosition={deckA.position || 0}
@@ -458,17 +468,16 @@ const DeckA: React.FC<DeckAProps> = ({
             setHotCues(updated);
           }}
         />
-      </div>
 
-      {/* Deck Controls */}
-      <div className="space-y-3">
+        {/* Transport Controls */}
         <div className="flex justify-center gap-2">
-          <Button variant="outline" size="sm" className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
+          <Button variant="outline" size="sm" className="h-8 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
             <SkipBack className="w-4 h-4" />
           </Button>
           <Button
+            size="sm"
             onClick={toggleDeckA}
-            className="bg-purple-500 hover:bg-purple-600 text-white px-6"
+            className="h-8 bg-purple-500 hover:bg-purple-600 text-white px-6"
             disabled={!deckA.currentTrack || deckA.isLoading}
           >
             {deckA.isLoading ? (
@@ -479,195 +488,193 @@ const DeckA: React.FC<DeckAProps> = ({
               <Play className="w-4 h-4" />
             )}
           </Button>
-          <Button variant="outline" size="sm" className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
+          <Button variant="outline" size="sm" className="h-8 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white">
             <SkipForward className="w-4 h-4" />
           </Button>
         </div>
-        
-        {/* Volume Control */}
+
+        {/* Volume & EQ Controls */}
         <div className="space-y-2">
-          <label className="text-white text-sm">Volume</label>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value={deckA.volume}
-            onChange={(e) => updateDeckAVolume(Number(e.target.value))}
-            className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple"
-          />
-          <div className="flex justify-between text-xs text-gray-400">
-            <span>0</span>
-            <span>{typeof deckA.volume === 'number' ? deckA.volume : 75}%</span>
-            <span>100</span>
-          </div>
-        </div>
-
-        {/* EQ Controls */}
-        <div className="grid grid-cols-3 gap-2">
-          <div className="text-center">
-            <label className="text-white text-xs">High</label>
+          <div>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <label className="text-white font-montserrat-bold">Volume</label>
+              <span className="text-gray-200 font-montserrat-bold tabular-nums">
+                {typeof deckA.volume === 'number' ? deckA.volume : 75}%
+              </span>
+            </div>
             <input
               type="range"
               min="0"
               max="100"
-              value={deckAEQ.high}
-              onChange={(e) => updateDeckAEQ({ ...deckAEQ, high: Number(e.target.value) })}
-              className="w-full h-1 bg-gray-700 rounded slider-purple"
+              value={deckA.volume}
+              onChange={(e) => updateDeckAVolume(Number(e.target.value))}
+              className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer slider-purple block"
             />
           </div>
-          <div className="text-center">
-            <label className="text-white text-xs">Mid</label>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={deckAEQ.mid}
-              onChange={(e) => updateDeckAEQ({ ...deckAEQ, mid: Number(e.target.value) })}
-              className="w-full h-1 bg-gray-700 rounded slider-purple"
-            />
+
+          <div className="grid grid-cols-3 gap-2">
+            <div className="text-center">
+              <label className="text-white text-[11px] block mb-1">High</label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={deckAEQ.high}
+                onChange={(e) => updateDeckAEQ({ ...deckAEQ, high: Number(e.target.value) })}
+                className="w-full h-1.5 bg-gray-700 rounded slider-purple block"
+              />
+            </div>
+            <div className="text-center">
+              <label className="text-white text-[11px] block mb-1">Mid</label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={deckAEQ.mid}
+                onChange={(e) => updateDeckAEQ({ ...deckAEQ, mid: Number(e.target.value) })}
+                className="w-full h-1.5 bg-gray-700 rounded slider-purple block"
+              />
+            </div>
+            <div className="text-center">
+              <label className="text-white text-[11px] block mb-1">Low</label>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={deckAEQ.low}
+                onChange={(e) => updateDeckAEQ({ ...deckAEQ, low: Number(e.target.value) })}
+                className="w-full h-1.5 bg-gray-700 rounded slider-purple block"
+              />
+            </div>
           </div>
-          <div className="text-center">
-            <label className="text-white text-xs">Low</label>
-            <input
-              type="range"
-              min="0"
-              max="100"
-              value={deckAEQ.low}
-              onChange={(e) => updateDeckAEQ({ ...deckAEQ, low: Number(e.target.value) })}
-              className="w-full h-1 bg-gray-700 rounded slider-purple"
-            />
+        </div>
+
+        {/* Performance Buttons (Effects, Loop, Beat Jump, Cue/Slip) */}
+        <div className="space-y-1.5">
+          <div className="grid grid-cols-2 gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              className={`h-7 text-xs border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+                deckAEffects.reverb > 0 ? 'bg-purple-400 text-white' : ''
+              }`}
+              onClick={toggleDeckAReverb}
+            >
+              <Zap className="w-3.5 h-3.5 mr-1" />
+              Reverb
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className={`h-7 text-xs border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+                deckAEffects.delay > 0 ? 'bg-purple-400 text-white' : ''
+              }`}
+              onClick={toggleDeckAEcho}
+            >
+              <Waves className="w-3.5 h-3.5 mr-1" />
+              Echo
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSetLoopIn}
+              className="h-7 border-green-400 text-green-400 hover:bg-green-400 hover:text-white text-xs px-1"
+            >
+              IN
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSetLoopOut}
+              className="h-7 border-red-400 text-red-400 hover:bg-red-400 hover:text-white text-xs px-1"
+            >
+              OUT
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleToggleLoop}
+              title="Toggle Loop"
+              className={`h-7 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1 ${
+                isLooping ? 'bg-purple-400 text-white' : ''
+              }`}
+            >
+              <Repeat className="w-3.5 h-3.5" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSetCue}
+              title="Set Cue Point"
+              className="h-7 border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white text-xs px-1"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleBeatJump(-4)}
+              className="h-7 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+            >
+              -4
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleBeatJump(-1)}
+              className="h-7 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+            >
+              -1
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleBeatJump(1)}
+              className="h-7 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+            >
+              +1
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleBeatJump(4)}
+              className="h-7 border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
+            >
+              +4
+            </Button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleJumpToCue}
+              className="h-7 text-xs border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white"
+              disabled={cuePoint === null}
+            >
+              <RotateCcw className="w-3.5 h-3.5 mr-1" />
+              CUE
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleToggleSlip}
+              className={`h-7 text-xs border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
+                isSlipMode ? 'bg-purple-400 text-white' : ''
+              }`}
+            >
+              <FastForward className="w-3.5 h-3.5 mr-1" />
+              SLIP
+            </Button>
           </div>
         </div>
-
-        {/* Effect Buttons */}
-        <div className="grid grid-cols-2 gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
-              deckAEffects.reverb > 0 ? 'bg-purple-400 text-white' : ''
-            }`}
-            onClick={toggleDeckAReverb}
-          >
-            <Zap className="w-4 h-4 mr-1" />
-            Reverb
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
-              deckAEffects.delay > 0 ? 'bg-purple-400 text-white' : ''
-            }`}
-            onClick={toggleDeckAEcho}
-          >
-            <Waves className="w-4 h-4 mr-1" />
-            Echo
-          </Button>
-        </div>
-
-        {/* Advanced Controls */}
-        <div className="grid grid-cols-4 gap-1 mb-3">
-          {/* Loop Controls */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSetLoopIn}
-            className="border-green-400 text-green-400 hover:bg-green-400 hover:text-white text-xs px-1"
-          >
-            IN
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSetLoopOut}
-            className="border-red-400 text-red-400 hover:bg-red-400 hover:text-white text-xs px-1"
-          >
-            OUT
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleToggleLoop}
-            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1 ${
-              isLooping ? 'bg-purple-400 text-white' : ''
-            }`}
-          >
-            <Repeat className="w-3 h-3" />
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleSetCue}
-            className="border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white text-xs px-1"
-          >
-            <Volume2 className="w-3 h-3" />
-          </Button>
-        </div>
-
-        {/* Beat Jump & Slip Mode */}
-        <div className="grid grid-cols-4 gap-1 mb-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBeatJump(-4)}
-            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
-          >
-            -4
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBeatJump(-1)}
-            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
-          >
-            -1
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBeatJump(1)}
-            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
-          >
-            +1
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleBeatJump(4)}
-            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-1"
-          >
-            +4
-          </Button>
-        </div>
-
-        {/* Cue & Slip Mode */}
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleJumpToCue}
-            className="border-orange-400 text-orange-400 hover:bg-orange-400 hover:text-white"
-            disabled={cuePoint === null}
-          >
-            <RotateCcw className="w-4 h-4 mr-1" />
-            CUE
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleToggleSlip}
-            className={`border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white ${
-              isSlipMode ? 'bg-purple-400 text-white' : ''
-            }`}
-          >
-            <FastForward className="w-4 h-4 mr-1" />
-            SLIP
-          </Button>
-        </div>
-
-
       </div>
-    </div>
     </DiscoLights>
   );
 };

@@ -150,6 +150,10 @@ export async function searchExternalSongs(
 export async function fetchAndSaveExternalSong(params: {
   query?: string;
   videoId?: string;
+  title?: string;
+  artist?: string;
+  duration?: number;
+  thumbnail?: string;
   ownerId?: string;
   user?: string;
   location?: string;
@@ -159,6 +163,10 @@ export async function fetchAndSaveExternalSong(params: {
     {
       query: params.query?.trim() || undefined,
       videoId: params.videoId?.trim() || undefined,
+      title: params.title?.trim() || undefined,
+      artist: params.artist?.trim() || undefined,
+      duration: params.duration || undefined,
+      thumbnail: params.thumbnail?.trim() || undefined,
       ownerId: params.ownerId?.trim() || undefined,
       user: params.user?.trim() || undefined,
       location: params.location?.trim() || undefined,

@@ -18,6 +18,7 @@ import { currencyFormatter } from '@/utils';
 import { Song } from '@/Types';
 import ConfirmationDialog from '@/components/ui/ConfirmationDialog';
 import AIMusicTab from '@/components/virtualDJ/AIMusicTab';
+import TrackDownloadButton from '@/components/virtualDJ/TrackDownloadButton';
 import {
   fetchAndSaveExternalSong,
   searchExternalSongs,
@@ -126,6 +127,10 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
       const { song } = await fetchAndSaveExternalSong({
         videoId: item.videoId,
         query: `${item.artist} ${item.title}`,
+        title: item.title,
+        artist: item.artist,
+        duration: item.duration,
+        thumbnail: item.thumbnail,
         ownerId,
         user: userFolder,
       });
@@ -282,32 +287,35 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
   };
 
   return (
-    <div className="glass-card p-4 animate-fade-in-up font-montserrat-light" style={{animationDelay: '0.5s'}}>
+    <div
+      className="glass-card h-full p-3.5 animate-fade-in-up font-montserrat-light flex flex-col"
+      style={{ animationDelay: '0.5s' }}
+    >
       {/* Header */}
-      <div className="flex items-center gap-2 mb-4">
-        <Music className="w-5 h-5 text-white" />
-        <h3 className="text-lg font-montserrat-bold text-white">
+      <div className="flex items-center gap-2 mb-2.5 flex-shrink-0">
+        <Music className="w-4 h-4 text-white" />
+        <h3 className="text-base font-montserrat-bold text-white">
           Music <span className="neon-text">Library</span>
         </h3>
       </div>
 
       {/* Toggle Source */}
-      <div className="flex rounded-md overflow-hidden mb-4 border border-gray-700">
+      <div className="flex rounded-md overflow-hidden mb-2.5 border border-gray-700 flex-shrink-0">
         <button 
           onClick={() => setSource('server')} 
-          className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${source === 'server' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          className={`flex-1 py-1 text-xs font-semibold transition-colors ${source === 'server' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
         >
           PlayMyJam
         </button>
         <button 
           onClick={() => setSource('local')} 
-          className={`flex-1 py-1.5 text-xs font-semibold transition-colors ${source === 'local' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          className={`flex-1 py-1 text-xs font-semibold transition-colors ${source === 'local' ? 'bg-purple-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
         >
           Local
         </button>
         <button 
           onClick={() => setSource('ai')} 
-          className={`flex-1 py-1.5 text-xs font-semibold transition-colors flex items-center justify-center gap-1 ${source === 'ai' ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          className={`flex-1 py-1 text-xs font-semibold transition-colors flex items-center justify-center gap-1 ${source === 'ai' ? 'bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
         >
           <Sparkles className="w-3 h-3" />
           AI
@@ -316,7 +324,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
       {/* AI Tab */}
       {source === 'ai' && (
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-hidden">
           <AIMusicTab
             loadTrackToDeckA={loadTrackToDeckA}
             loadTrackToDeckB={loadTrackToDeckB}
@@ -326,16 +334,16 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
       {/* Local Files Input & Scan */}
       {source === 'local' && (
-        <div className="mb-4 space-y-2">
+        <div className="mb-2.5 space-y-1.5 flex-shrink-0">
           {window.electronAPI && (
             <button 
               onClick={handleScanMusic}
-              className="w-full text-center py-2 px-4 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold transition-colors shadow-lg"
+              className="w-full text-center py-1.5 px-3 rounded-md bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold transition-colors shadow-lg"
             >
               Scan System Music Folder
             </button>
           )}
-          <label className="block w-full text-center py-2 px-4 rounded-md border border-dashed border-gray-600 bg-gray-800 hover:bg-gray-700 cursor-pointer transition-colors">
+          <label className="block w-full text-center py-1.5 px-3 rounded-md border border-dashed border-gray-600 bg-gray-800 hover:bg-gray-700 cursor-pointer transition-colors">
             <span className="text-xs text-gray-300 font-semibold">Select Local Audio Files Manually</span>
             <input 
               type="file" 
@@ -350,7 +358,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
       {/* Search - only show for server/local tabs */}
       {source !== 'ai' && (
-        <div className="pt-3 border-t border-gray-700 mb-4 space-y-2">
+        <div className="mb-2.5 flex-shrink-0">
           <div className="relative flex items-center gap-1.5">
             <input
               type="text"
@@ -367,7 +375,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                   ? 'Search PlayMyJam or press Enter to search online...'
                   : 'Search tracks...'
               }
-              className="w-full px-3 py-2 rounded bg-gray-800 text-white text-xs border border-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
+              className="w-full px-2.5 py-1.5 rounded bg-gray-800 text-white text-xs border border-gray-700 focus:outline-none focus:ring-2 focus:ring-purple-500"
             />
             {source === 'server' && search.trim().length >= 2 && (
               <button
@@ -375,7 +383,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                 onClick={() => void handleExternalSearch()}
                 disabled={isSearchingExternal}
                 title="Search online & import to Firebase"
-                className="px-2.5 py-2 rounded bg-cyan-600/80 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs flex items-center gap-1 flex-shrink-0 transition-colors"
+                className="px-2 py-1.5 rounded bg-cyan-600/80 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs flex items-center gap-1 flex-shrink-0 transition-colors"
               >
                 {isSearchingExternal ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -390,8 +398,8 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
       {/* Song List - Scrollable */}
       {source !== 'ai' && (
-      <div className="overflow-hidden">
-        <div className="space-y-2 h-full overflow-y-auto custom-scrollbar pr-2">
+      <div className="flex-1 min-h-0 overflow-hidden">
+        <div className="space-y-1 h-full overflow-y-auto custom-scrollbar pr-1">
         {isLoadingSongs && source === 'server' ? (
           <div className="text-center py-8">
             <div className="w-6 h-6 border border-purple-400 border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
@@ -446,47 +454,47 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                   e.dataTransfer.setData('application/json', JSON.stringify(song));
                   e.dataTransfer.effectAllowed = 'copy';
                 }}
-                className={`rounded-lg p-1 hover:bg-gray-700/50 transition-colors group cursor-grab active:cursor-grabbing ${
+                className={`rounded-md px-1.5 py-1 hover:bg-gray-700/50 transition-colors group cursor-grab active:cursor-grabbing ${
                   isPlaying
-                    ? 'bg-gray-800/50 border-2 border-red-500' // Tomato border for playing songs
-                    : 'bg-gray-800/30 border-2 border-transparent'
+                    ? 'bg-gray-800/60 border border-red-500' // Tomato border for playing songs
+                    : 'bg-gray-800/30 border border-transparent'
                 }`}
               >
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2">
                   {/* Album Art */}
-                  <div className="w-12 h-12 bg-gradient-to-br from-purple-500 to-blue-500 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-blue-500 rounded flex items-center justify-center flex-shrink-0 overflow-hidden">
                     {song.albumArt ? (
                       <img
                         src={song.albumArt}
                         alt="Album Art"
-                        className="w-full h-full rounded-lg object-cover"
+                        className="w-full h-full object-cover"
                       />
                     ) : (
-                      <Music className="w-5 h-5 text-white" />
+                      <Music className="w-4 h-4 text-white" />
                     )}
                   </div>
 
                   {/* Song Info */}
                   <div className="flex-1 min-w-0">
-                    <h4 className="text-white font-semibold text-xs truncate">
+                    <h4 className="text-white font-semibold text-xs leading-tight truncate">
                       {song.title}
                     </h4>
-                    <div className="flex items-center gap-2 text-xs text-gray-400">
-                      <User className="w-3 h-3" />
+                    <div className="flex items-center gap-1 text-[10px] text-gray-400 leading-tight mt-0.5">
+                      <User className="w-2.5 h-2.5 flex-shrink-0" />
                       <span className="truncate">{song.artist}</span>
                     </div>
 
                     {/* Show bid amount only if there are bids */}
                     {hasBids && bidAmount ? (
-                      <div className="flex items-center gap-1 text-xs text-green-400 mt-1">
+                      <div className="flex items-center gap-1 text-[10px] text-green-400 leading-tight mt-0.5">
                         <span className="font-semibold">{currencyFormatter(bidAmount)}</span>
                       </div>
                     ) : null}
 
                     {/* Read-only TikTok song request badge (never touches Firestore bids) */}
                     {ttCoins !== null && (
-                      <div className="flex items-center gap-1 text-[10px] text-pink-300 mt-1">
-                        <span className="px-1.5 py-0.5 rounded bg-pink-500/20 border border-pink-500/40 font-semibold">
+                      <div className="flex items-center gap-1 text-[9px] text-pink-300 mt-0.5">
+                        <span className="px-1.5 py-0.5 rounded bg-pink-500/20 border border-pink-500/40 font-semibold leading-none">
                           TikTok Request • {ttCoins > 0 ? `${ttCoins} coins` : 'Free'}
                         </span>
                       </div>
@@ -494,35 +502,44 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                   </div>
 
                   {/* Action Buttons */}
-                  <div className="flex gap-1 items-center">
-                    
-
+                  <div className="flex gap-1 items-center flex-shrink-0">
                     {/* Load to deck buttons */}
                     <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-2 py-1 h-auto"
+                        className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-[10px] px-1.5 py-0.5 h-6"
                         onClick={() => loadTrackToDeckA(song)}
+                        title="Load to Deck A"
                       >
                         A
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-white text-xs px-2 py-1 h-auto"
+                        className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-white text-[10px] px-1.5 py-0.5 h-6"
                         onClick={() => loadTrackToDeckB(song)}
+                        title="Load to Deck B"
                       >
                         B
                       </Button>
                     </div>
+
+                    {/* Download song locally to device Downloads folder */}
+                    {source === 'server' && (
+                      <TrackDownloadButton
+                        song={song}
+                        variant="outline"
+                        className="h-6 w-6 p-0 opacity-75 group-hover:opacity-100"
+                      />
+                    )}
 
                     {/* Cancel button for songs with bids */}
                     {hasBids && bidAmount ? (
                       <Button
                         size="sm"
                         variant="outline"
-                        className="border-red-400 text-red-400 hover:bg-red-400 hover:text-white text-xs px-2 py-1 h-auto"
+                        className="border-red-400 text-red-400 hover:bg-red-400 hover:text-white text-[10px] px-1.5 py-0.5 h-6"
                         onClick={() => handleCancelBidClick(song)}
                       >
                         <X className="w-3 h-3" />
@@ -537,7 +554,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
 
         {/* External Search Results (fetched via play-server & saved to Firebase) */}
         {source === 'server' && (externalError || externalResults.length > 0) && (
-          <div className="mt-3 pt-3 border-t border-cyan-500/30 space-y-2">
+          <div className="mt-2.5 pt-2.5 border-t border-cyan-500/30 space-y-1.5">
             <div className="flex items-center justify-between text-[11px]">
               <span className="flex items-center gap-1.5 font-semibold text-cyan-300">
                 <Globe className="w-3.5 h-3.5" />
@@ -569,14 +586,14 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
               return (
                 <div
                   key={item.videoId}
-                  className={`rounded-lg p-2 border transition-colors ${
+                  className={`rounded-md p-1.5 border transition-colors ${
                     savedSong
                       ? 'bg-green-950/25 border-green-500/40'
                       : 'bg-gray-800/50 border-cyan-500/25'
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-md bg-gray-900 flex items-center justify-center overflow-hidden flex-shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded bg-gray-900 flex items-center justify-center overflow-hidden flex-shrink-0">
                       {item.thumbnail ? (
                         <img
                           src={item.thumbnail}
@@ -589,10 +606,10 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                     </div>
 
                     <div className="flex-1 min-w-0">
-                      <h4 className="text-white font-semibold text-xs truncate">
+                      <h4 className="text-white font-semibold text-xs leading-tight truncate">
                         {savedSong?.title || item.title}
                       </h4>
-                      <div className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                      <div className="flex items-center gap-1 text-[10px] text-gray-400 leading-tight mt-0.5">
                         <span className="truncate">{savedSong?.artist || item.artist}</span>
                         {item.duration > 0 && (
                           <span className="text-[10px] text-gray-500 flex-shrink-0">
@@ -608,7 +625,7 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                           <Button
                             size="sm"
                             variant="outline"
-                            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-xs px-2 py-1 h-auto"
+                            className="border-purple-400 text-purple-400 hover:bg-purple-400 hover:text-white text-[10px] px-1.5 py-0.5 h-6"
                             onClick={() => loadTrackToDeckA(savedSong)}
                             title="Load to Deck A"
                           >
@@ -617,19 +634,24 @@ const MusicLibrary: React.FC<MusicLibraryProps> = ({
                           <Button
                             size="sm"
                             variant="outline"
-                            className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-white text-xs px-2 py-1 h-auto"
+                            className="border-blue-400 text-blue-400 hover:bg-blue-400 hover:text-white text-[10px] px-1.5 py-0.5 h-6"
                             onClick={() => loadTrackToDeckB(savedSong)}
                             title="Load to Deck B"
                           >
                             B
                           </Button>
+                          <TrackDownloadButton
+                            song={savedSong}
+                            variant="outline"
+                            className="h-6 w-6 p-0"
+                          />
                         </>
                       ) : (
                         <Button
                           size="sm"
                           disabled={Boolean(fetchingVideoId)}
                           onClick={() => void handleFetchAndSaveExternal(item)}
-                          className="bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] px-2 py-1 h-auto"
+                          className="bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] px-2 py-0.5 h-6"
                         >
                           {isFetchingThis ? (
                             <>

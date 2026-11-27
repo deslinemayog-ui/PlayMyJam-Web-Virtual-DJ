@@ -12,6 +12,12 @@ declare global {
   interface Window {
     electronAPI?: {
       scanMusic: () => Promise<string[]>;
+      downloadTrack?: (payload: { url: string; fileName?: string }) => Promise<{
+        success: boolean;
+        filePath?: string;
+        fileName?: string;
+        error?: string;
+      }>;
       storeGet: (key: string) => Promise<string | null>;
       storeSet: (key: string, value: string) => Promise<void>;
       storeDelete: (key: string) => Promise<void>;

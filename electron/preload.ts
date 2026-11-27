@@ -10,6 +10,8 @@ function subscribe<T = unknown>(channel: string, callback: (payload: T) => void)
 
 contextBridge.exposeInMainWorld('electronAPI', {
   scanMusic: () => ipcRenderer.invoke('scan-music'),
+  downloadTrack: (payload: { url: string; fileName?: string }) =>
+    ipcRenderer.invoke('download-track', payload),
   storeGet: (key: string) => ipcRenderer.invoke('store-get', key),
   storeSet: (key: string, value: string) => ipcRenderer.invoke('store-set', key, value),
   storeDelete: (key: string) => ipcRenderer.invoke('store-delete', key),

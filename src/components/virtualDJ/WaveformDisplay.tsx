@@ -11,6 +11,7 @@ interface WaveformProps {
   hotCueColors?: string[];
   loopIn?: number | null;
   loopOut?: number | null;
+  height?: number;
 }
 
 const BAR_COUNT = 200;
@@ -26,6 +27,7 @@ const WaveformDisplay: React.FC<WaveformProps> = ({
   hotCueColors = ['#ff4444','#ff8800','#ffff00','#00ff44','#00ffff','#4488ff','#aa44ff','#ff44aa'],
   loopIn,
   loopOut,
+  height = 64,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [waveformData, setWaveformData] = useState<number[]>([]);
@@ -174,11 +176,11 @@ const WaveformDisplay: React.FC<WaveformProps> = ({
   };
 
   return (
-    <div className="relative w-full rounded-md overflow-hidden" style={{ height: 64 }}>
+    <div className="relative w-full rounded-md overflow-hidden" style={{ height }}>
       <canvas
         ref={canvasRef}
         width={600}
-        height={64}
+        height={height}
         className="w-full h-full cursor-crosshair"
         onClick={handleClick}
         style={{ display: 'block' }}

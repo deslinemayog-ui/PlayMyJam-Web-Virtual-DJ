@@ -502,8 +502,12 @@ const FFMPEG_BIN = resolveBinary(
 );
 
 const WRITABLE_COOKIES_PATH = path.join(os.tmpdir(), 'ytdlp-cookies.txt');
+const GCS_COOKIES_OBJECT_NAME = 'ytdlp-cookies.json';
 let seededCookiesSourceHash = null;
+let lastPersistedCookiesHash = null;
 let cookieJobChain = Promise.resolve();
+let cachedGcpAccessToken = null;
+let cachedGcpAccessTokenExpiry = 0;
 
 function hasRealCookieEntries(content) {
   return String(content || '')
@@ -514,39 +518,34 @@ function hasRealCookieEntries(content) {
     });
 }
 
-// Seed /tmp/ytdlp-cookies.txt ONCE per secret version so yt-dlp's rotated cookies persist across calls
-function ensureWritableCookiesCopy(content) {
-  const sourceHash = CryptoJS.SHA256(content).toString();
-  if (seededCookiesSourceHash !== sourceHash || !fs.existsSync(WRITABLE_COOKIES_PATH)) {
-    fs.writeFileSync(WRITABLE_COOKIES_PATH, content, { mode: 0o600 });
-    seededCookiesSourceHash = sourceHash;
-    console.log('[yt-dlp] Seeded writable cookies file in /tmp');
-  }
-  return WRITABLE_COOKIES_PATH;
+function getCookiesStateBucket() {
+  return (process.env.YTDLP_COOKIES_STATE_BUCKET || '').trim();
 }
 
-function buildYtDlpCookieArgs() {
-  // 1. Optional base64-encoded cookies.txt env var
+function getYtDlpProxyUrl() {
+  return (process.env.YTDLP_PROXY || '').trim();
+}
+
+function readConfiguredSourceCookies() {
   const cookiesB64 = (process.env.YTDLP_COOKIES_B64 || '').trim();
   if (cookiesB64) {
     try {
       const decoded = Buffer.from(cookiesB64, 'base64').toString('utf8');
       if (hasRealCookieEntries(decoded)) {
-        return ['--cookies', ensureWritableCookiesCopy(decoded)];
+        return { mode: 'file', content: decoded };
       }
     } catch (err) {
       console.warn('[yt-dlp] Failed to decode YTDLP_COOKIES_B64:', err.message);
     }
   }
 
-  // 2. Mounted cookies.txt file (Cloud Run Secret Manager read-only mount -> seed writable /tmp once)
   const cookieFile = (process.env.YTDLP_COOKIES_FILE || '').trim();
   if (cookieFile) {
     try {
       if (fs.existsSync(cookieFile)) {
         const content = fs.readFileSync(cookieFile, 'utf8');
         if (hasRealCookieEntries(content)) {
-          return ['--cookies', ensureWritableCookiesCopy(content)];
+          return { mode: 'file', content };
         }
       }
     } catch (err) {
@@ -554,32 +553,182 @@ function buildYtDlpCookieArgs() {
     }
   }
 
-  // 3. Local development only: read cookies directly from a local desktop browser profile
   const cookieBrowser = (process.env.YTDLP_COOKIES_FROM_BROWSER || '').trim();
   if (cookieBrowser) {
-    return ['--cookies-from-browser', cookieBrowser];
+    return { mode: 'browser', browser: cookieBrowser };
   }
-  return [];
+
+  return { mode: 'none' };
 }
 
-function execYtDlpOnce(args, timeoutMs, useCookies) {
-  return new Promise((resolve, reject) => {
-    const cookieArgs = useCookies ? buildYtDlpCookieArgs() : [];
-    const finalArgs = [
-      '--force-ipv4',
-      '--js-runtimes',
-      'deno',
-      '--js-runtimes',
-      'node',
-      '--remote-components',
-      'ejs:github',
-      ...cookieArgs,
-      ...args,
-    ];
-    if (FFMPEG_BIN) {
-      finalArgs.unshift('--ffmpeg-location', path.dirname(FFMPEG_BIN));
-    }
+function hasYtDlpCookiesConfigured() {
+  return readConfiguredSourceCookies().mode !== 'none';
+}
 
+async function getGcpAccessToken() {
+  if (cachedGcpAccessToken && Date.now() < cachedGcpAccessTokenExpiry) {
+    return cachedGcpAccessToken;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(
+      'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
+      {
+        headers: { 'Metadata-Flavor': 'Google' },
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.access_token) return null;
+    cachedGcpAccessToken = data.access_token;
+    cachedGcpAccessTokenExpiry = Date.now() + Math.max(60, Number(data.expires_in || 300) - 90) * 1000;
+    return cachedGcpAccessToken;
+  } catch {
+    return null;
+  }
+}
+
+async function loadPersistedCookiesFromGcs(expectedSourceHash) {
+  const bucket = getCookiesStateBucket();
+  if (!bucket) return null;
+  const token = await getGcpAccessToken();
+  if (!token) return null;
+
+  try {
+    const url = `https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(bucket)}/o/${encodeURIComponent(GCS_COOKIES_OBJECT_NAME)}?alt=media`;
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    if (
+      payload &&
+      payload.sourceHash === expectedSourceHash &&
+      typeof payload.cookies === 'string' &&
+      hasRealCookieEntries(payload.cookies)
+    ) {
+      return payload.cookies;
+    }
+  } catch (err) {
+    console.warn('[yt-dlp] Could not load persisted cookies from GCS:', err.message);
+  }
+  return null;
+}
+
+async function savePersistedCookiesToGcs(sourceHash, cookiesContent) {
+  const bucket = getCookiesStateBucket();
+  if (!bucket || !sourceHash || !hasRealCookieEntries(cookiesContent)) return;
+  const contentHash = CryptoJS.SHA256(cookiesContent).toString();
+  if (contentHash === lastPersistedCookiesHash) return;
+
+  const token = await getGcpAccessToken();
+  if (!token) return;
+
+  try {
+    const url = `https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(bucket)}/o?uploadType=media&name=${encodeURIComponent(GCS_COOKIES_OBJECT_NAME)}`;
+    const body = JSON.stringify({
+      sourceHash,
+      cookies: cookiesContent,
+      updatedAt: new Date().toISOString(),
+    });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body,
+    });
+    if (res.ok) {
+      lastPersistedCookiesHash = contentHash;
+      console.log('[yt-dlp] Persisted rotated cookies to GCS state bucket');
+    } else {
+      console.warn(`[yt-dlp] Failed to persist rotated cookies to GCS (HTTP ${res.status})`);
+    }
+  } catch (err) {
+    console.warn('[yt-dlp] Error persisting rotated cookies to GCS:', err.message);
+  }
+}
+
+// Seed /tmp/ytdlp-cookies.txt ONCE per secret version, restoring rotated cookies from GCS across Cloud Run cold starts
+async function prepareWritableCookiesArgs() {
+  const configured = readConfiguredSourceCookies();
+  if (configured.mode === 'browser') {
+    return { args: ['--cookies-from-browser', configured.browser], sourceHash: null };
+  }
+  if (configured.mode !== 'file') {
+    return { args: [], sourceHash: null };
+  }
+
+  const sourceHash = CryptoJS.SHA256(
+    `${process.env.YTDLP_COOKIES_UPDATED_AT || ''}:${configured.content}`
+  ).toString();
+
+  if (seededCookiesSourceHash !== sourceHash || !fs.existsSync(WRITABLE_COOKIES_PATH)) {
+    const restoredFromGcs = await loadPersistedCookiesFromGcs(sourceHash);
+    const activeCookies = restoredFromGcs || configured.content;
+    fs.writeFileSync(WRITABLE_COOKIES_PATH, activeCookies, { mode: 0o600 });
+    seededCookiesSourceHash = sourceHash;
+    lastPersistedCookiesHash = CryptoJS.SHA256(activeCookies).toString();
+    console.log(
+      restoredFromGcs
+        ? '[yt-dlp] Restored rotated cookies from GCS state bucket into /tmp'
+        : '[yt-dlp] Seeded writable cookies file in /tmp from Secret Manager'
+    );
+  }
+
+  return { args: ['--cookies', WRITABLE_COOKIES_PATH], sourceHash };
+}
+
+function isYouTubeBotError(err) {
+  const msg = String(err?.message || err || '');
+  return /sign in to confirm you.?re not a bot|login_required|use --cookies-from-browser or --cookies/i.test(
+    msg
+  );
+}
+
+function formatFetchSongError(err) {
+  const msg = String(err?.message || err || 'Failed to fetch and save external song.');
+  if (isYouTubeBotError(msg)) {
+    return 'YouTube rejected the cloud server session (expired cookies on datacenter IP). Please refresh YouTube cookies from a fresh Incognito window using ./play/upload-cookies.sh, or configure YTDLP_PROXY on play-server.';
+  }
+  return msg;
+}
+
+async function execYtDlpOnce(args, timeoutMs, options = {}) {
+  const proxyUrl = getYtDlpProxyUrl();
+  const skipCookiesForProxy = Boolean(proxyUrl) && process.env.YTDLP_USE_COOKIES_WITH_PROXY !== 'true';
+  const shouldUseCookies = options.useCookies !== false && !skipCookiesForProxy;
+
+  let cookieArgs = [];
+  let activeSourceHash = null;
+  if (shouldUseCookies) {
+    const prepared = await prepareWritableCookiesArgs();
+    cookieArgs = prepared.args;
+    activeSourceHash = prepared.sourceHash;
+  }
+
+  const proxyArgs = proxyUrl && options.useProxy !== false ? ['--proxy', proxyUrl] : [];
+  const finalArgs = [
+    '--force-ipv4',
+    '--js-runtimes',
+    'deno',
+    '--js-runtimes',
+    'node',
+    '--remote-components',
+    'ejs:github',
+    ...proxyArgs,
+    ...cookieArgs,
+    ...args,
+  ];
+  if (FFMPEG_BIN) {
+    finalArgs.unshift('--ffmpeg-location', path.dirname(FFMPEG_BIN));
+  }
+
+  const result = await new Promise((resolve, reject) => {
     execFile(
       YTDLP_BIN,
       finalArgs,
@@ -620,17 +769,29 @@ function execYtDlpOnce(args, timeoutMs, useCookies) {
       }
     );
   });
+
+  // Persist rotated cookies after a successful cookie-backed yt-dlp call so Cloud Run restarts keep them
+  if (activeSourceHash && fs.existsSync(WRITABLE_COOKIES_PATH)) {
+    try {
+      const updatedCookies = fs.readFileSync(WRITABLE_COOKIES_PATH, 'utf8');
+      await savePersistedCookiesToGcs(activeSourceHash, updatedCookies);
+    } catch (persistErr) {
+      console.warn('[yt-dlp] Could not read updated cookies for persistence:', persistErr.message);
+    }
+  }
+
+  return result;
 }
 
 function runYtDlp(args, timeoutMs = 120000, options = {}) {
   const useCookies = options.useCookies !== false;
   if (!useCookies) {
-    return execYtDlpOnce(args, timeoutMs, false);
+    return execYtDlpOnce(args, timeoutMs, options);
   }
   // Serialize cookie-backed yt-dlp calls so concurrent downloads never race-write /tmp/ytdlp-cookies.txt
   const nextJob = cookieJobChain.then(
-    () => execYtDlpOnce(args, timeoutMs, true),
-    () => execYtDlpOnce(args, timeoutMs, true)
+    () => execYtDlpOnce(args, timeoutMs, options),
+    () => execYtDlpOnce(args, timeoutMs, options)
   );
   cookieJobChain = nextJob.catch(() => {});
   return nextJob;
@@ -784,11 +945,161 @@ app.post('/api/search-song', async (req, res) => {
   }
 });
 
+async function fetchYouTubeOEmbedMetadata(videoId) {
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(oembedUrl, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data?.title) return null;
+    return formatSearchEntry({
+      id: videoId,
+      title: data.title,
+      channel: data.author_name || '',
+      thumbnail: data.thumbnail_url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      duration: 0,
+      webpage_url: `https://www.youtube.com/watch?v=${videoId}`,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function tokenizeMatchText(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 2 && !/^(official|video|audio|lyrics|hd|hq|ft|feat|remix|the|and)$/.test(w));
+}
+
+async function findMatchingSoundCloudTrack(artist, title) {
+  const searchTerms = [artist, title]
+    .filter((s) => s && !/^unknown artist$/i.test(s.trim()))
+    .join(' ')
+    .trim();
+  if (searchTerms.length < 3) return null;
+
+  try {
+    const { stdout } = await runYtDlp(
+      ['--dump-single-json', '--flat-playlist', '--no-warnings', `scsearch5:${searchTerms}`],
+      25000,
+      { useCookies: false }
+    );
+    const parsed = JSON.parse(stdout);
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    const expectedTokens = Array.from(new Set(tokenizeMatchText(`${artist} ${title}`)));
+    if (expectedTokens.length === 0) return null;
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const entry of entries) {
+      const url = entry?.webpage_url || entry?.url || '';
+      const duration = Math.round(Number(entry?.duration) || 0);
+      // Skip 30-second Go+ previews and ultra-long DJ sets
+      if (!url || (duration > 0 && (duration < 60 || duration > 900))) continue;
+
+      const candidateText = `${entry?.title || ''} ${entry?.uploader || ''} ${entry?.channel || ''}`;
+      const candidateTokens = new Set(tokenizeMatchText(candidateText));
+      const matchedCount = expectedTokens.filter((t) => candidateTokens.has(t)).length;
+      const ratio = matchedCount / expectedTokens.length;
+      const minNeeded = expectedTokens.length >= 2 ? 2 : 1;
+
+      if (matchedCount >= minNeeded && ratio >= 0.65 && ratio > bestScore) {
+        bestScore = ratio;
+        bestMatch = {
+          url,
+          duration,
+          title: entry?.title || title,
+        };
+      }
+    }
+
+    return bestMatch;
+  } catch (err) {
+    console.warn('[SoundCloud fallback] Search failed:', err.message);
+    return null;
+  }
+}
+
+async function downloadAudioToTemp({ candidate, outputTemplate }) {
+  const targetUrl = `https://www.youtube.com/watch?v=${candidate.videoId}`;
+  const commonDownloadArgs = [
+    '--no-playlist',
+    '-f',
+    'bestaudio[ext=m4a]/bestaudio[abr<=160]/bestaudio/best',
+    '-x',
+    '--audio-format',
+    'mp3',
+    '--audio-quality',
+    '128K',
+    '--max-filesize',
+    '60M',
+    '--retries',
+    '3',
+    '--fragment-retries',
+    '3',
+    '--socket-timeout',
+    '25',
+    '-o',
+    outputTemplate,
+  ];
+
+  // 1. Primary YouTube download (uses persisted cookies or YTDLP_PROXY if configured)
+  try {
+    await runYtDlp([...commonDownloadArgs, targetUrl], 220000);
+    return { source: 'youtube' };
+  } catch (primaryErr) {
+    if (!isYouTubeBotError(primaryErr)) {
+      throw primaryErr;
+    }
+
+    console.warn(
+      `⚠️ YouTube bot/cookie wall hit for ${candidate.videoId}. Trying cookie-free alternate clients...`
+    );
+
+    // 2. Quick cookie-free retry with alternate YouTube clients (recovers if only the cookie expired)
+    try {
+      await runYtDlp(
+        [
+          '--extractor-args',
+          'youtube:player_client=tv,android_vr,mweb',
+          ...commonDownloadArgs,
+          targetUrl,
+        ],
+        90000,
+        { useCookies: false }
+      );
+      return { source: 'youtube' };
+    } catch (altClientErr) {
+      console.warn(`⚠️ Alternate YouTube clients also blocked: ${altClientErr.message}`);
+    }
+
+    // 3. Verified SoundCloud fallback (no cookies required, not blocked on Cloud Run IPs)
+    const scMatch = await findMatchingSoundCloudTrack(candidate.artist, candidate.title);
+    if (scMatch) {
+      console.log(`🎵 Falling back to SoundCloud match: "${scMatch.title}" (${scMatch.url})`);
+      await runYtDlp([...commonDownloadArgs, scMatch.url], 150000, { useCookies: false });
+      return { source: 'soundcloud' };
+    }
+
+    throw primaryErr;
+  }
+}
+
 // Search/fetch audio via yt-dlp + ffmpeg, upload to Firebase Storage, save to Firestore, and return PlayMyJam song URL
 app.post('/api/fetch-song', async (req, res) => {
   try {
     const rawQuery = typeof req.body?.query === 'string' ? req.body.query.trim() : '';
     const rawVideoId = typeof req.body?.videoId === 'string' ? req.body.videoId.trim() : '';
+    const providedTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
+    const providedArtist = typeof req.body?.artist === 'string' ? req.body.artist.trim() : '';
+    const providedThumbnail = typeof req.body?.thumbnail === 'string' ? req.body.thumbnail.trim() : '';
+    const providedDuration = Math.max(0, Math.round(Number(req.body?.duration) || 0));
 
     if (!rawQuery && !rawVideoId) {
       return res.status(400).json({
@@ -827,39 +1138,13 @@ app.post('/api/fetch-song', async (req, res) => {
     }
 
     const fetchPromise = (async () => {
-      // 1. Resolve candidate track(s) metadata (keep top 3 so we can fall back if one video fails)
-      let candidateList = [];
-      if (rawVideoId) {
-        const { stdout } = await runYtDlp(
-          ['--dump-single-json', '--no-playlist', '--no-warnings', `https://www.youtube.com/watch?v=${rawVideoId}`],
-          45000
-        );
-        candidateList = [formatSearchEntry(JSON.parse(stdout))];
-      } else {
-        const candidates = await searchYouTubeTracks(rawQuery, 5);
-        if (!candidates.length) {
-          const notFoundErr = new Error(`No external audio found for "${rawQuery}".`);
-          notFoundErr.statusCode = 404;
-          throw notFoundErr;
-        }
-        candidateList = candidates.slice(0, 3);
-      }
-
       const sanitizeFilename = (name) => name.replace(/[^a-zA-Z0-9\s._-]/g, '').trim();
-      const fetchedDir = path.join(os.tmpdir(), 'play-server-fetched');
-      if (!fs.existsSync(fetchedDir)) {
-        fs.mkdirSync(fetchedDir, { recursive: true });
-      }
 
-      let lastAttemptError = null;
-
-      for (const candidate of candidateList) {
-        const externalSourceId = `yt_${candidate.videoId}`;
+      const buildOrCloneCachedResponse = async (candidate, externalSourceId) => {
         const cleanArtist = sanitizeFilename(candidate.artist) || 'Unknown Artist';
         const cleanTitle = sanitizeFilename(candidate.title) || 'Untitled Track';
         const finalFileName = `${cleanArtist} - ${cleanTitle}.mp3`;
 
-        // 2. Check if already stored in Firebase (instant reuse if present)
         const { ownerMatch, sharedTrack } = await findExistingFirebaseSong(
           externalSourceId,
           firestoreOwnerId
@@ -880,11 +1165,11 @@ app.post('/api/fetch-song', async (req, res) => {
           const audioUrl = sharedTrack.audioUrl || sharedTrack.url;
           const musicData = {
             id: musicId,
-            title: sharedTrack.title || candidate.title,
-            artist: sharedTrack.artist || candidate.artist,
+            title: sharedTrack.title || candidate.title || 'Untitled Track',
+            artist: sharedTrack.artist || candidate.artist || 'Unknown Artist',
             active: true,
             genres: sharedTrack.genres || 'External',
-            albumArt: sharedTrack.albumArt || candidate.thumbnail,
+            albumArt: sharedTrack.albumArt || candidate.thumbnail || 'https://mrdocs.empiredigitals.org/playIcon.png',
             audioUrl,
             url: audioUrl,
             duration: Number(sharedTrack.duration) || candidate.duration || 0,
@@ -894,11 +1179,11 @@ app.post('/api/fetch-song', async (req, res) => {
             fileName: sharedTrack.fileName || finalFileName,
             currentBid: 0,
             fingerprint: sharedTrack.fingerprint || randomUUID(),
-            titleLowerCase: (sharedTrack.title || candidate.title).toLowerCase(),
-            artistLowerCase: (sharedTrack.artist || candidate.artist).toLowerCase(),
+            titleLowerCase: (sharedTrack.title || candidate.title || 'Untitled Track').toLowerCase(),
+            artistLowerCase: (sharedTrack.artist || candidate.artist || 'Unknown Artist').toLowerCase(),
             albumLowerCase: '',
             location,
-            externalSource: 'youtube',
+            externalSource: sharedTrack.externalSource || 'youtube',
             externalSourceId,
           };
 
@@ -912,6 +1197,84 @@ app.post('/api/fetch-song', async (req, res) => {
           };
         }
 
+        return null;
+      };
+
+      // 0. Cache-first shortcut for explicit videoId BEFORE making any YouTube request!
+      if (rawVideoId) {
+        const quickCached = await buildOrCloneCachedResponse(
+          {
+            videoId: rawVideoId,
+            title: providedTitle || rawQuery || 'Untitled Track',
+            artist: providedArtist || 'Unknown Artist',
+            duration: providedDuration,
+            thumbnail: providedThumbnail || `https://i.ytimg.com/vi/${rawVideoId}/hqdefault.jpg`,
+          },
+          `yt_${rawVideoId}`
+        );
+        if (quickCached) {
+          return quickCached;
+        }
+      }
+
+      // 1. Resolve candidate track(s) metadata without burning an extra cookie-backed YouTube request
+      let candidateList = [];
+      if (rawVideoId) {
+        if (providedTitle) {
+          candidateList = [
+            {
+              videoId: rawVideoId,
+              title: providedTitle,
+              artist: providedArtist || 'Unknown Artist',
+              rawTitle: providedTitle,
+              duration: providedDuration,
+              thumbnail: providedThumbnail || `https://i.ytimg.com/vi/${rawVideoId}/hqdefault.jpg`,
+              webpageUrl: `https://www.youtube.com/watch?v=${rawVideoId}`,
+            },
+          ];
+        } else {
+          const oembedCandidate = await fetchYouTubeOEmbedMetadata(rawVideoId);
+          if (oembedCandidate) {
+            candidateList = [oembedCandidate];
+          } else {
+            const { stdout } = await runYtDlp(
+              ['--dump-single-json', '--no-playlist', '--no-warnings', `https://www.youtube.com/watch?v=${rawVideoId}`],
+              45000
+            );
+            candidateList = [formatSearchEntry(JSON.parse(stdout))];
+          }
+        }
+      } else {
+        const candidates = await searchYouTubeTracks(rawQuery, 5);
+        if (!candidates.length) {
+          const notFoundErr = new Error(`No external audio found for "${rawQuery}".`);
+          notFoundErr.statusCode = 404;
+          throw notFoundErr;
+        }
+        candidateList = candidates.slice(0, 3);
+      }
+
+      const fetchedDir = path.join(os.tmpdir(), 'play-server-fetched');
+      if (!fs.existsSync(fetchedDir)) {
+        fs.mkdirSync(fetchedDir, { recursive: true });
+      }
+
+      let lastAttemptError = null;
+
+      for (const candidate of candidateList) {
+        const externalSourceId = `yt_${candidate.videoId}`;
+        const cleanArtist = sanitizeFilename(candidate.artist) || 'Unknown Artist';
+        const cleanTitle = sanitizeFilename(candidate.title) || 'Untitled Track';
+        const finalFileName = `${cleanArtist} - ${cleanTitle}.mp3`;
+
+        // 2. Check if already stored in Firebase (instant reuse for query-based imports)
+        if (!rawVideoId) {
+          const cachedResponse = await buildOrCloneCachedResponse(candidate, externalSourceId);
+          if (cachedResponse) {
+            return cachedResponse;
+          }
+        }
+
         // 3. Download MP3 audio via yt-dlp + ffmpeg into OS temp dir (avoids nodemon restarts in dev)
         const tempId = uuidv4();
         const outputTemplate = path.join(fetchedDir, `${tempId}.%(ext)s`);
@@ -921,30 +1284,7 @@ app.post('/api/fetch-song', async (req, res) => {
         console.log(`⬇️ Fetching external audio: ${candidate.artist} - ${candidate.title} (${targetUrl})`);
 
         try {
-          await runYtDlp(
-            [
-              '--no-playlist',
-              '-f',
-              'bestaudio[ext=m4a]/bestaudio[abr<=160]/bestaudio/best',
-              '-x',
-              '--audio-format',
-              'mp3',
-              '--audio-quality',
-              '128K',
-              '--max-filesize',
-              '60M',
-              '--retries',
-              '3',
-              '--fragment-retries',
-              '3',
-              '--socket-timeout',
-              '25',
-              '-o',
-              outputTemplate,
-              targetUrl,
-            ],
-            220000
-          );
+          const downloadOutcome = await downloadAudioToTemp({ candidate, outputTemplate });
 
           let downloadedPath = expectedMp3Path;
           if (!fs.existsSync(downloadedPath)) {
@@ -1014,7 +1354,7 @@ app.post('/api/fetch-song', async (req, res) => {
             artistLowerCase: candidate.artist.toLowerCase(),
             albumLowerCase: '',
             location,
-            externalSource: 'youtube',
+            externalSource: downloadOutcome.source || 'youtube',
             externalSourceId,
           };
 
@@ -1073,7 +1413,7 @@ app.post('/api/fetch-song', async (req, res) => {
     const status = error.statusCode || 500;
     return res.status(status).json({
       success: false,
-      error: error.message || 'Failed to fetch and save external song.',
+      error: formatFetchSongError(error),
     });
   }
 });
@@ -1145,7 +1485,9 @@ app.get('/api/tiktok/health', (_req, res) => {
     region: process.env.CLOUD_RUN_REGION || 'local',
     activeStreams: activeTikTokConnections.size,
     maxStreams: MAX_CONCURRENT_TIKTOK_STREAMS,
-    ytdlpCookiesConfigured: buildYtDlpCookieArgs().length > 0,
+    ytdlpCookiesConfigured: hasYtDlpCookiesConfigured(),
+    cookiesStateBucketConfigured: Boolean(getCookiesStateBucket()),
+    proxyConfigured: Boolean(getYtDlpProxyUrl()),
   });
 });
 
