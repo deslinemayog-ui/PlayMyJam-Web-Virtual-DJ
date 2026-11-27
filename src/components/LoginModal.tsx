@@ -43,7 +43,7 @@ const LoginModal = () => {
 
   const validateForm = () => {
     const errors: { phoneNumber?: string; password?: string } = {};
-    
+
     if (!phoneNumber.trim()) {
       errors.phoneNumber = 'Phone number is required';
     } else {
@@ -52,13 +52,13 @@ const LoginModal = () => {
         errors.phoneNumber = `Please enter a valid phone number for ${selectedCountry.name}`;
       }
     }
-    
+
     if (!password.trim()) {
       errors.password = 'Password is required';
     } else if (password.length < 6) {
       errors.password = 'Password must be at least 6 characters';
     }
-    
+
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   };
@@ -95,11 +95,11 @@ const LoginModal = () => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div 
+      <div
         className="absolute inset-0 bg-black/60 backdrop-blur-sm"
         onClick={handleClose}
       />
-      
+
       {/* Modal */}
       <div className="relative z-10 w-full max-w-md mx-4">
         <div className="glass-card p-8 animate-fade-in-up">
@@ -187,11 +187,10 @@ const LoginModal = () => {
                             setShowCountryPicker(false);
                             setCountrySearch('');
                           }}
-                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${
-                            isSelected
+                          className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left text-xs transition-colors ${isSelected
                               ? 'bg-purple-500/20 text-white font-medium'
                               : 'text-gray-300 hover:bg-white/10 hover:text-white'
-                          }`}
+                            }`}
                         >
                           <img
                             src={c.flag}
@@ -234,11 +233,10 @@ const LoginModal = () => {
                       setFormErrors(prev => ({ ...prev, phoneNumber: undefined }));
                     }
                   }}
-                  className={`w-full pl-10 pr-4 py-3 bg-white/5 border rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
-                    formErrors.phoneNumber 
-                      ? 'border-red-500 focus:ring-red-500/50' 
+                  className={`w-full pl-10 pr-4 py-3 bg-white/5 border rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${formErrors.phoneNumber
+                      ? 'border-red-500 focus:ring-red-500/50'
                       : 'border-white/10 focus:border-purple-400 focus:ring-purple-400/50'
-                  }`}
+                    }`}
                   placeholder="e.g. 71 234 5678"
                   disabled={isLoading}
                 />
@@ -266,11 +264,10 @@ const LoginModal = () => {
                       setFormErrors(prev => ({ ...prev, password: undefined }));
                     }
                   }}
-                  className={`w-full pl-10 pr-12 py-3 bg-white/5 border rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${
-                    formErrors.password 
-                      ? 'border-red-500 focus:ring-red-500/50' 
+                  className={`w-full pl-10 pr-12 py-3 bg-white/5 border rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 transition-colors ${formErrors.password
+                      ? 'border-red-500 focus:ring-red-500/50'
                       : 'border-white/10 focus:border-purple-400 focus:ring-purple-400/50'
-                  }`}
+                    }`}
                   placeholder="Enter your password"
                   disabled={isLoading}
                 />
@@ -312,7 +309,9 @@ const LoginModal = () => {
           <div className="mt-6 text-center">
             <p className="text-gray-400 text-sm">
               Don't have an account?{' '}
-              <button className="text-purple-400 hover:text-purple-300 font-medium transition-colors">
+              <button onClick={() => {
+                window.location.href = 'https://playmyjam.empirelabs.digital/'
+              }} className="text-purple-400 hover:text-purple-300 font-medium transition-colors">
                 Sign up on the app
               </button>
             </p>
