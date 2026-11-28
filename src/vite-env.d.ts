@@ -3,6 +3,7 @@ import type {
   TikTokChatEvent,
   TikTokGiftEvent,
   TikTokLikeEvent,
+  TikTokMemberEvent,
   TikTokRoomStatsEvent,
   TikTokSocialEvent,
   TikTokStatusEvent,
@@ -16,6 +17,36 @@ declare global {
         success: boolean;
         filePath?: string;
         fileName?: string;
+        error?: string;
+      }>;
+      fetchLocalExternalSong?: (payload: {
+        query?: string;
+        videoId?: string;
+        title?: string;
+        artist?: string;
+        duration?: number;
+        thumbnail?: string;
+        ownerId?: string;
+        user?: string;
+        location?: string;
+        uploadBaseUrl?: string;
+      }) => Promise<{
+        success: boolean;
+        unavailable?: boolean;
+        cached?: boolean;
+        localFallback?: boolean;
+        data?: {
+          id: string;
+          title: string;
+          artist: string;
+          albumArt?: string;
+          audioUrl: string;
+          url: string;
+          duration?: number;
+          ownerId?: string;
+          externalSource?: string;
+          externalSourceId?: string;
+        };
         error?: string;
       }>;
       storeGet: (key: string) => Promise<string | null>;
@@ -40,6 +71,7 @@ declare global {
         onChat: (callback: (chat: TikTokChatEvent) => void) => () => void;
         onLike: (callback: (like: TikTokLikeEvent) => void) => () => void;
         onSocial: (callback: (social: TikTokSocialEvent) => void) => () => void;
+        onMember?: (callback: (member: TikTokMemberEvent) => void) => () => void;
         onRoomStats: (callback: (stats: TikTokRoomStatsEvent) => void) => () => void;
       };
     };

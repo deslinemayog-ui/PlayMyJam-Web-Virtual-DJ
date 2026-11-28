@@ -973,60 +973,94 @@ function tokenizeMatchText(text) {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length >= 2 && !/^(official|video|audio|lyrics|hd|hq|ft|feat|remix|the|and)$/.test(w));
+    .filter((w) => w.length >= 2 && !/^(official|video|audio|lyrics|hd|hq|ft|feat|remix|the|and|with)$/.test(w));
 }
 
-async function findMatchingSoundCloudTrack(artist, title) {
-  const searchTerms = [artist, title]
-    .filter((s) => s && !/^unknown artist$/i.test(s.trim()))
+function compactAlphaNum(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+async function findMatchingSoundCloudTrack(artist, title, rawQuery = '') {
+  const cleanArtist = String(artist || '')
+    .replace(/\s*(?:&|and|feat\.?|ft\.?)\s+the\s+.*$/i, '')
+    .trim();
+  const cleanTitle = String(title || '').trim();
+  const cleanRaw = String(rawQuery || '').trim();
+
+  // Prefer the clean user query first (avoids random YouTube uploader channel names polluting SoundCloud search)
+  const searchCandidates = [];
+  if (cleanRaw.length >= 3) {
+    searchCandidates.push(cleanRaw);
+  }
+  const combined = [cleanArtist, cleanTitle]
+    .filter((s) => s && !/^unknown artist$/i.test(s))
     .join(' ')
     .trim();
-  if (searchTerms.length < 3) return null;
-
-  try {
-    const { stdout } = await runYtDlp(
-      ['--dump-single-json', '--flat-playlist', '--no-warnings', `scsearch5:${searchTerms}`],
-      25000,
-      { useCookies: false }
-    );
-    const parsed = JSON.parse(stdout);
-    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
-    const expectedTokens = Array.from(new Set(tokenizeMatchText(`${artist} ${title}`)));
-    if (expectedTokens.length === 0) return null;
-
-    let bestMatch = null;
-    let bestScore = 0;
-
-    for (const entry of entries) {
-      const url = entry?.webpage_url || entry?.url || '';
-      const duration = Math.round(Number(entry?.duration) || 0);
-      // Skip 30-second Go+ previews and ultra-long DJ sets
-      if (!url || (duration > 0 && (duration < 60 || duration > 900))) continue;
-
-      const candidateText = `${entry?.title || ''} ${entry?.uploader || ''} ${entry?.channel || ''}`;
-      const candidateTokens = new Set(tokenizeMatchText(candidateText));
-      const matchedCount = expectedTokens.filter((t) => candidateTokens.has(t)).length;
-      const ratio = matchedCount / expectedTokens.length;
-      const minNeeded = expectedTokens.length >= 2 ? 2 : 1;
-
-      if (matchedCount >= minNeeded && ratio >= 0.65 && ratio > bestScore) {
-        bestScore = ratio;
-        bestMatch = {
-          url,
-          duration,
-          title: entry?.title || title,
-        };
-      }
-    }
-
-    return bestMatch;
-  } catch (err) {
-    console.warn('[SoundCloud fallback] Search failed:', err.message);
-    return null;
+  if (combined.length >= 3 && !searchCandidates.some((q) => q.toLowerCase() === combined.toLowerCase())) {
+    searchCandidates.push(combined);
   }
+  if (cleanTitle.length >= 4 && !searchCandidates.some((q) => q.toLowerCase() === cleanTitle.toLowerCase())) {
+    searchCandidates.push(cleanTitle);
+  }
+
+  const expectedSource = cleanRaw.length >= 3 ? cleanRaw : combined || cleanTitle;
+  const expectedTokens = Array.from(new Set(tokenizeMatchText(expectedSource)));
+  if (expectedTokens.length === 0 || searchCandidates.length === 0) return null;
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const searchTerms of searchCandidates.slice(0, 2)) {
+    try {
+      const { stdout } = await runYtDlp(
+        ['--dump-single-json', '--flat-playlist', '--no-warnings', `scsearch8:${searchTerms}`],
+        25000,
+        { useCookies: false }
+      );
+      const parsed = JSON.parse(stdout);
+      const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+
+      for (const entry of entries) {
+        const url = entry?.webpage_url || entry?.url || '';
+        const duration = Math.round(Number(entry?.duration) || 0);
+        // Skip 30-second Go+ previews and ultra-long DJ sets
+        if (!url || (duration > 0 && (duration < 60 || duration > 900))) continue;
+
+        const candidateText = `${entry?.title || ''} ${entry?.uploader || ''} ${entry?.channel || ''} ${Array.isArray(entry?.artists) ? entry.artists.join(' ') : ''}`;
+        const candidateTokens = new Set(tokenizeMatchText(candidateText));
+        const candidateCompact = compactAlphaNum(candidateText);
+
+        let matchedCount = 0;
+        for (const token of expectedTokens) {
+          if (candidateTokens.has(token) || (token.length >= 5 && candidateCompact.includes(token))) {
+            matchedCount += 1;
+          }
+        }
+        const ratio = matchedCount / expectedTokens.length;
+        const minNeeded = expectedTokens.length >= 2 ? 2 : 1;
+
+        if (matchedCount >= minNeeded && ratio >= 0.65 && ratio > bestScore) {
+          bestScore = ratio;
+          bestMatch = {
+            url,
+            duration,
+            title: entry?.title || cleanTitle,
+          };
+        }
+      }
+
+      if (bestMatch && bestScore >= 0.85) break;
+    } catch (err) {
+      console.warn('[SoundCloud fallback] Search failed:', err.message);
+    }
+  }
+
+  return bestMatch;
 }
 
-async function downloadAudioToTemp({ candidate, outputTemplate }) {
+async function downloadAudioToTemp({ candidate, outputTemplate, rawQuery = '' }) {
   const targetUrl = `https://www.youtube.com/watch?v=${candidate.videoId}`;
   const commonDownloadArgs = [
     '--no-playlist',
@@ -1080,7 +1114,7 @@ async function downloadAudioToTemp({ candidate, outputTemplate }) {
     }
 
     // 3. Verified SoundCloud fallback (no cookies required, not blocked on Cloud Run IPs)
-    const scMatch = await findMatchingSoundCloudTrack(candidate.artist, candidate.title);
+    const scMatch = await findMatchingSoundCloudTrack(candidate.artist, candidate.title, rawQuery);
     if (scMatch) {
       console.log(`🎵 Falling back to SoundCloud match: "${scMatch.title}" (${scMatch.url})`);
       await runYtDlp([...commonDownloadArgs, scMatch.url], 150000, { useCookies: false });
@@ -1100,6 +1134,7 @@ app.post('/api/fetch-song', async (req, res) => {
     const providedArtist = typeof req.body?.artist === 'string' ? req.body.artist.trim() : '';
     const providedThumbnail = typeof req.body?.thumbnail === 'string' ? req.body.thumbnail.trim() : '';
     const providedDuration = Math.max(0, Math.round(Number(req.body?.duration) || 0));
+    const cacheOnly = req.body?.cacheOnly === true;
 
     if (!rawQuery && !rawVideoId) {
       return res.status(400).json({
@@ -1130,7 +1165,7 @@ app.post('/api/fetch-song', async (req, res) => {
         ? req.body.location.trim()
         : 'Unknown';
 
-    const dedupeKey = `${firestoreOwnerId}:${rawVideoId || rawQuery.toLowerCase()}`;
+    const dedupeKey = `${firestoreOwnerId}:${cacheOnly ? 'cache:' : ''}${rawVideoId || rawQuery.toLowerCase()}`;
     if (inFlightSongFetches.has(dedupeKey)) {
       console.log(`⏳ Joining in-flight fetch for "${dedupeKey}"`);
       const existingResult = await inFlightSongFetches.get(dedupeKey);
@@ -1215,6 +1250,20 @@ app.post('/api/fetch-song', async (req, res) => {
         if (quickCached) {
           return quickCached;
         }
+        if (cacheOnly) {
+          return {
+            success: true,
+            cached: false,
+            data: null,
+            candidate: {
+              videoId: rawVideoId,
+              title: providedTitle || rawQuery || 'Untitled Track',
+              artist: providedArtist || 'Unknown Artist',
+              duration: providedDuration,
+              thumbnail: providedThumbnail || `https://i.ytimg.com/vi/${rawVideoId}/hqdefault.jpg`,
+            },
+          };
+        }
       }
 
       // 1. Resolve candidate track(s) metadata without burning an extra cookie-backed YouTube request
@@ -1275,6 +1324,11 @@ app.post('/api/fetch-song', async (req, res) => {
           }
         }
 
+        // If caller only wanted a fast Firebase cache lookup (e.g. Electron desktop will download on residential IP)
+        if (cacheOnly) {
+          continue;
+        }
+
         // 3. Download MP3 audio via yt-dlp + ffmpeg into OS temp dir (avoids nodemon restarts in dev)
         const tempId = uuidv4();
         const outputTemplate = path.join(fetchedDir, `${tempId}.%(ext)s`);
@@ -1284,7 +1338,7 @@ app.post('/api/fetch-song', async (req, res) => {
         console.log(`⬇️ Fetching external audio: ${candidate.artist} - ${candidate.title} (${targetUrl})`);
 
         try {
-          const downloadOutcome = await downloadAudioToTemp({ candidate, outputTemplate });
+          const downloadOutcome = await downloadAudioToTemp({ candidate, outputTemplate, rawQuery });
 
           let downloadedPath = expectedMp3Path;
           if (!fs.existsSync(downloadedPath)) {
@@ -1398,6 +1452,15 @@ app.post('/api/fetch-song', async (req, res) => {
         }
       }
 
+      if (cacheOnly) {
+        return {
+          success: true,
+          cached: false,
+          data: null,
+          candidate: candidateList[0] || null,
+        };
+      }
+
       throw lastAttemptError || new Error(`Could not download external audio for "${rawQuery}".`);
     })();
 
@@ -1415,6 +1478,137 @@ app.post('/api/fetch-song', async (req, res) => {
       success: false,
       error: formatFetchSongError(error),
     });
+  }
+});
+
+// Upload externally fetched audio (e.g. downloaded on DJ's residential Electron desktop IP) to Firebase Storage + Firestore
+app.post('/api/upload-external-song', async (req, res) => {
+  let tempFilePath = '';
+  try {
+    const audioFile = req.files?.audio;
+    if (!audioFile) {
+      return res.status(400).json({ success: false, error: 'No audio file uploaded.' });
+    }
+    tempFilePath = audioFile.tempFilePath || '';
+
+    const rawVideoId = typeof req.body?.videoId === 'string' ? req.body.videoId.trim() : '';
+    const title = (typeof req.body?.title === 'string' && req.body.title.trim()) || 'Untitled Track';
+    const artist = (typeof req.body?.artist === 'string' && req.body.artist.trim()) || 'Unknown Artist';
+    const thumbnail =
+      (typeof req.body?.thumbnail === 'string' && req.body.thumbnail.trim()) ||
+      (rawVideoId ? `https://i.ytimg.com/vi/${rawVideoId}/hqdefault.jpg` : 'https://mrdocs.empiredigitals.org/playIcon.png');
+    const externalSource =
+      (typeof req.body?.externalSource === 'string' && req.body.externalSource.trim()) || 'youtube';
+    const externalSourceId = rawVideoId ? `yt_${rawVideoId}` : `ext_${randomUUID().slice(0, 12)}`;
+
+    const sanitizedUser =
+      typeof req.body?.user === 'string' && req.body.user.trim()
+        ? req.body.user.trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
+        : 'external_search';
+    const firestoreOwnerId =
+      typeof req.body?.ownerId === 'string' && req.body.ownerId.trim()
+        ? req.body.ownerId.trim()
+        : sanitizedUser;
+    const location =
+      typeof req.body?.location === 'string' && req.body.location.trim()
+        ? req.body.location.trim()
+        : 'Unknown';
+
+    const audioBuffer = tempFilePath && fs.existsSync(tempFilePath)
+      ? fs.readFileSync(tempFilePath)
+      : Buffer.isBuffer(audioFile.data)
+        ? audioFile.data
+        : null;
+
+    if (!audioBuffer || audioBuffer.length < 1024) {
+      return res.status(400).json({ success: false, error: 'Uploaded audio file is empty.' });
+    }
+
+    const rawExt = path.extname(audioFile.name || '').toLowerCase();
+    const isM4a = rawExt === '.m4a' || /mp4|m4a|aac/i.test(audioFile.mimetype || '');
+    const ext = isM4a ? '.m4a' : '.mp3';
+    const contentType = isM4a ? 'audio/mp4' : 'audio/mpeg';
+
+    let trackDurationSeconds = Math.max(0, Math.round(Number(req.body?.duration) || 0));
+    if (!trackDurationSeconds) {
+      try {
+        const metadata = await parseBuffer(audioBuffer, contentType);
+        if (metadata?.format?.duration) {
+          trackDurationSeconds = Math.round(metadata.format.duration);
+        }
+      } catch (metaErr) {
+        console.warn(`[UploadExternalSong] Could not parse duration: ${metaErr.message}`);
+      }
+    }
+
+    const sanitizeFilename = (name) => name.replace(/[^a-zA-Z0-9\s._-]/g, '').trim();
+    const cleanArtist = sanitizeFilename(artist) || 'Unknown Artist';
+    const cleanTitle = sanitizeFilename(title) || 'Untitled Track';
+    const finalFileName = `${cleanArtist} - ${cleanTitle}${ext}`;
+
+    const musicId = `music_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const storagePath = `music/${sanitizedUser}/${musicId}_audio${ext}`;
+    const storageRef = ref(firebaseStorage, storagePath);
+
+    console.log(`☁️ [DesktopUpload] Uploading external track to Firebase Storage: ${storagePath} (${Math.round(audioBuffer.length / 1024)} KB)`);
+    await uploadBytes(storageRef, audioBuffer, { contentType });
+    const audioUrl = await getDownloadURL(storageRef);
+
+    const musicData = {
+      id: musicId,
+      title,
+      artist,
+      active: true,
+      genres: 'External',
+      albumArt: thumbnail,
+      audioUrl,
+      url: audioUrl,
+      duration: trackDurationSeconds,
+      ownerId: firestoreOwnerId,
+      uploadDate: new Date().toISOString(),
+      playCount: 0,
+      fileName: finalFileName,
+      currentBid: 0,
+      fingerprint: randomUUID(),
+      titleLowerCase: title.toLowerCase(),
+      artistLowerCase: artist.toLowerCase(),
+      albumLowerCase: '',
+      location,
+      externalSource,
+      externalSourceId,
+    };
+
+    const trackData = {
+      ...musicData,
+      ownerId: '',
+      freePlays: 0,
+      premiumPlays: 0,
+      creditPlays: 0,
+      creditPlaysClaimed: 0,
+    };
+
+    await Promise.all([
+      setDoc(doc(firestoreDb, 'music', musicId), musicData),
+      setDoc(doc(firestoreDb, 'tracks', musicId), trackData),
+    ]);
+
+    console.log(`✅ [DesktopUpload] Saved to Firestore: ${artist} - ${title} (${musicId})`);
+    return res.json({
+      success: true,
+      cached: false,
+      message: 'Song fetched locally and saved to Firebase successfully.',
+      data: musicData,
+    });
+  } catch (err) {
+    console.error(`[UploadExternalSong] Error: ${err.message}`);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to upload external song to Firebase.',
+    });
+  } finally {
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      fs.unlink(tempFilePath, () => {});
+    }
   }
 });
 
@@ -1674,6 +1868,18 @@ app.post('/api/tiktok/stream', async (req, res) => {
       });
     });
 
+    conn.on(WebcastEvent.MEMBER, (data) => {
+      const user = data.user;
+      sendEvent('member', {
+        id: `member-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        userId: String(user?.id ?? ''),
+        uniqueId: user?.displayId || 'viewer',
+        nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+        profilePictureUrl: getTikTokAvatarUrl(user),
+        timestamp: Date.now(),
+      });
+    });
+
     conn.on(WebcastEvent.ROOM_USER, (data) => {
       sendEvent('roomStats', {
         viewerCount: Number(data.total ?? 0),
@@ -1741,6 +1947,861 @@ app.post('/api/tiktok/stream', async (req, res) => {
     console.error(`❌ [TikTokRelay] Connect failed for @${uniqueId}:`, message);
     emitStatus('error', { error: message, fatal: true });
     await cleanup();
+  }
+});
+
+// ============================================================================
+// AI MC Script + Gemini AI Voice TTS Endpoint (Zimbabwean & Club Hype MC)
+// ============================================================================
+
+let cachedGeminiKey = null;
+let cachedGeminiKeyExpiresAt = 0;
+
+async function getCachedGeminiApiKey() {
+  if (cachedGeminiKey && Date.now() < cachedGeminiKeyExpiresAt) {
+    return cachedGeminiKey;
+  }
+  const envKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (envKey && envKey !== 'YOUR_GEMINI_API_KEY_HERE') {
+    cachedGeminiKey = envKey;
+    cachedGeminiKeyExpiresAt = Date.now() + 5 * 60 * 1000;
+    return cachedGeminiKey;
+  }
+  const secrets = await getSecretKeys();
+  const key = (secrets?.[0]?.GEMINI_API_KEY || '').trim();
+  if (key && key !== 'YOUR_GEMINI_API_KEY_HERE') {
+    cachedGeminiKey = key;
+    cachedGeminiKeyExpiresAt = Date.now() + 5 * 60 * 1000;
+    return cachedGeminiKey;
+  }
+  return '';
+}
+
+function pcmToWavBuffer(pcmBuffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16) {
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.length;
+  const header = Buffer.alloc(44);
+
+  header.write('RIFF', 0);
+  header.writeUInt32LE(36 + dataSize, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16); // PCM chunk size
+  header.writeUInt16LE(1, 20); // PCM format
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+function cleanSpokenViewerName(raw) {
+  let clean = String(raw || '')
+    .replace(/^@+/, '')
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ')
+    .replace(/[._-]+/g, ' ')
+    .replace(/\d{3,}/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return 'my friend';
+  // Keep it short & natural to pronounce (max 2 words / 24 chars)
+  clean = clean.split(' ').slice(0, 2).join(' ').slice(0, 24).trim();
+  return clean || 'my friend';
+}
+
+const AI_MC_ACCENT_STYLES = {
+  zim: {
+    scriptGuide:
+      'Authentic Zimbabwean (Harare) club DJ / hype MC personality. Speak warm, rhythmic Zimbabwean English with natural, tasteful Zimbabwean MC flavor — e.g. occasional "Ehhh!", "Haaa!", "Shaa!", "Big up!", "Moto!", "Pamberi!", "Bho here!", "Zvinhu zvakachinja!" — without overdoing slang so every viewer understands.',
+    ttsDirector:
+      'Speak with a warm, charismatic, rhythmic Zimbabwean English accent from Harare like an energetic live club DJ MC on the microphone',
+  },
+  sa: {
+    scriptGuide:
+      'Authentic South African (Joburg / Amapiano) club MC personality. Natural SA English with tasteful flavor like "Eish!", "Sharp sharp!", "Awe!", "Yoh!", "Groove is on!".',
+    ttsDirector:
+      'Speak with a vibrant South African Johannesburg club MC accent and lively Amapiano DJ energy',
+  },
+  jamaican: {
+    scriptGuide:
+      'Authentic Jamaican dancehall sound-system selector / MC personality with hype expressions like "Big up!", "Pull up!", "Bless up!", "Massive!".',
+    ttsDirector:
+      'Speak with an upbeat Jamaican dancehall sound-system MC accent and lively rhythm',
+  },
+  us_club: {
+    scriptGuide:
+      'High-energy American club DJ MC personality ("Yo!", "Let\'s go!", "Make some noise!").',
+    ttsDirector:
+      'Speak with an upbeat American nightclub DJ hype MC voice with crisp energy',
+  },
+  uk_club: {
+    scriptGuide:
+      'Charismatic London UK club MC personality ("Big up!", "Oi oi!", "Locked in!").',
+    ttsDirector:
+      'Speak with a lively London UK club DJ MC accent and charisma',
+  },
+};
+
+const AI_MC_ENERGY_STYLES = {
+  hype: 'high-energy, hyped, upbeat nightclub MC delivery',
+  radio: 'smooth, confident, charismatic FM radio DJ delivery',
+  chill: 'warm, relaxed, friendly lounge host delivery',
+};
+
+const VALID_GEMINI_VOICES = new Set(['Fenrir', 'Puck', 'Charon', 'Kore', 'Aoede', 'Zephyr']);
+
+function buildFallbackMCLine(params) {
+  const dj = params.djName || 'the DJ';
+  const about = params.aboutLive || 'we keep the party moving nonstop';
+  const names = (params.viewerNames || []).map(cleanSpokenViewerName).filter(Boolean);
+  const viewer = cleanSpokenViewerName(params.viewerName || names[0] || '');
+  const trackLabel =
+    params.currentTrack?.title
+      ? `${params.currentTrack.title}${params.currentTrack.artist ? ` by ${params.currentTrack.artist}` : ''}`
+      : '';
+
+  switch (params.eventType) {
+    case 'join': {
+      const joinedList =
+        names.length > 1
+          ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+          : viewer;
+      return `Ehhh! Welcome ${joinedList} to ${dj}'s live! ${about}`;
+    }
+    case 'question':
+      return `Big up ${viewer}! ${trackLabel ? `Right now we're bumping ${trackLabel}. ` : ''}${about}`;
+    case 'gift':
+      return `Haaa! Big shoutout to ${viewer} for dropping ${params.giftCount > 1 ? `${params.giftCount} ` : 'that '}${params.giftName || 'gift'}! Moto in the building!`;
+    case 'follow':
+      return `Ehhh! Big love to ${viewer} for hitting that follow button! Welcome to the family!`;
+    case 'share':
+      return `Shoutout to ${viewer} for sharing the live! Bring the whole crew in!`;
+    case 'now_playing':
+      return trackLabel
+        ? `Listen up massive! Dropping ${trackLabel} right now on ${dj}'s decks!`
+        : `Ehhh! ${dj} keeping the decks on fire right now!`;
+    case 'song_queued':
+    case 'song_need_coins':
+    case 'ai_song_cooking':
+    case 'ai_song_ready':
+    case 'custom':
+      return String(params.customText || `Ehhh! Welcome to ${dj}'s live!`).trim();
+    default:
+      return `Ehhh! Make some noise in the chat! ${dj} on the decks — ${about}`;
+  }
+}
+
+async function generateAIMCScript(apiKey, params) {
+  const accentCfg = AI_MC_ACCENT_STYLES[params.accent] || AI_MC_ACCENT_STYLES.zim;
+  const energyDesc = AI_MC_ENERGY_STYLES[params.energy] || AI_MC_ENERGY_STYLES.hype;
+  const djName = (params.djName || 'the DJ').slice(0, 50);
+  const mcName = (params.mcName || 'MC Tino').slice(0, 40);
+  const aboutLive = (
+    params.aboutLive ||
+    'Here we play nonstop club hits and take live song requests when you drop a gift!'
+  ).slice(0, 320);
+  const trackInfo =
+    params.currentTrack?.title
+      ? `${params.currentTrack.title}${params.currentTrack.artist ? ` by ${params.currentTrack.artist}` : ''}`
+      : 'No track playing right now';
+
+  const cleanNames = (Array.isArray(params.viewerNames) ? params.viewerNames : [])
+    .map(cleanSpokenViewerName)
+    .filter(Boolean)
+    .slice(0, 4);
+  const singleViewer = cleanSpokenViewerName(params.viewerName || cleanNames[0] || '');
+  const recentLines = (Array.isArray(params.recentLines) ? params.recentLines : [])
+    .slice(0, 6)
+    .map((l) => String(l).slice(0, 140));
+
+  let eventInstruction = '';
+  switch (params.eventType) {
+    case 'join': {
+      const joined = cleanNames.length > 0 ? cleanNames.join(', ') : singleViewer;
+      eventInstruction = `Viewer(s) just entered the TikTok LIVE: ${joined}. Welcome them by name in an exciting MC way (e.g. starting with an exclamation like "Ehhh!" or "Haaa!" or "Big up!") and briefly weave in what this live is about.`;
+      break;
+    }
+    case 'question':
+      eventInstruction = `Viewer "${singleViewer}" wrote in the TikTok LIVE chat: "${String(params.question || '').slice(0, 220)}". Mention "${singleViewer}" by name and react naturally in MC style — if they asked a question, read/reference it briefly and give a clear, helpful answer (using the currently playing song or live rules if relevant); if they said hello, gave a location/shoutout, or hyped the music, read/react to their message and hype them back warmly!`;
+      break;
+    case 'gift':
+      eventInstruction = `Viewer "${singleViewer}" just sent ${params.giftCount || 1}x ${params.giftName || 'gift'} (${params.giftCoins || 1} coins)! Give them a loud, hyped MC thank-you shoutout and remind them they can drop a song request in the chat!`;
+      break;
+    case 'follow':
+      eventInstruction = `Viewer "${singleViewer}" just followed the DJ! Give them a quick, warm, hyped MC welcome to the family.`;
+      break;
+    case 'share':
+      eventInstruction = `Viewer "${singleViewer}" just shared the LIVE! Give them a quick, hyped MC shoutout for spreading the vibes.`;
+      break;
+    case 'now_playing':
+      eventInstruction = `Announce the track currently dropping on the decks: "${trackInfo}". Keep it short and hype like a club MC introducing a banger.`;
+      break;
+    case 'song_queued':
+    case 'song_need_coins':
+    case 'ai_song_cooking':
+    case 'ai_song_ready':
+      eventInstruction = String(params.customText || `Give a quick hype shoutout to ${singleViewer} on DJ ${djName}'s live!`).slice(0, 320);
+      break;
+    case 'custom':
+      eventInstruction = `Deliver this exact DJ announcement in your natural MC style without losing the core message: "${String(params.customText || '').slice(0, 280)}".`;
+      break;
+    default:
+      eventInstruction = `Drop a fresh, energetic crowd-hype shoutout reminding viewers what's happening on the live and to tap the screen / request their favorite tracks.`;
+      break;
+  }
+
+  const prompt = [
+    `You are ${mcName}, the live AI MC hosting a TikTok LIVE DJ session for DJ ${djName}.`,
+    `Style: ${accentCfg.scriptGuide}`,
+    `Delivery: ${energyDesc}.`,
+    `About this LIVE: ${aboutLive}`,
+    `Currently playing on the decks: ${trackInfo}`,
+    recentLines.length > 0
+      ? `Avoid repeating these recent lines:\n- ${recentLines.join('\n- ')}`
+      : '',
+    `Task: ${eventInstruction}`,
+    `Strict rules:`,
+    `- Return ONLY the exact spoken words — NO quotes, NO stage directions, NO asterisks, NO emojis, NO hashtags.`,
+    `- Keep it punchy and fast: 1 to 2 short sentences (maximum 32 words) so it sounds awesome over music.`,
+    `- Sound natural and spontaneous, never robotic.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const modelCandidates = [
+    'gemini-3.8-flash',
+    'gemini-flash-latest',
+    'gemini-2.5-flash-lite',
+    'gemini-3-flash-preview',
+  ];
+  for (const model of modelCandidates) {
+    // Try with thinkingBudget: 0 first for ultra-fast live MC latency; fall back to standard config if unsupported
+    const genConfigs = [
+      {
+        temperature: 0.95,
+        maxOutputTokens: 1024,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+      {
+        temperature: 0.95,
+        maxOutputTokens: 1024,
+      },
+    ];
+
+    for (const generationConfig of genConfigs) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ role: 'user', parts: [{ text: prompt }] }],
+              generationConfig,
+            }),
+          }
+        );
+
+        if (!res.ok) {
+          const errText = await res.text().catch(() => '');
+          console.warn(`[AI-MC] Script model ${model} failed (${res.status}): ${errText.slice(0, 200)}`);
+          // Only retry second generationConfig on HTTP 400 (unsupported thinkingConfig); skip to next model on 404/429/5xx
+          if (res.status !== 400) break;
+          continue;
+        }
+
+        const json = await res.json();
+        const rawText = (json?.candidates?.[0]?.content?.parts || [])
+          .filter((p) => p && !p.thought && typeof p.text === 'string')
+          .map((p) => p.text)
+          .join(' ')
+          .trim();
+
+        if (rawText) {
+          // Strip quotes, markdown, and stage directions so TTS reads cleanly
+          const cleaned = rawText
+            .replace(/^["'`]+|["'`]+$/g, '')
+            .replace(/[*_#]+/g, '')
+            .replace(/\[[^\]]*\]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (cleaned) return cleaned;
+        }
+        break;
+      } catch (err) {
+        console.warn(`[AI-MC] Script model ${model} error:`, err.message);
+        break;
+      }
+    }
+  }
+
+  return buildFallbackMCLine(params);
+}
+
+async function synthesizeGeminiTTS(apiKey, text, { accent, energy, voiceName }) {
+  const accentCfg = AI_MC_ACCENT_STYLES[accent] || AI_MC_ACCENT_STYLES.zim;
+  const energyDesc = AI_MC_ENERGY_STYLES[energy] || AI_MC_ENERGY_STYLES.hype;
+  const chosenVoice = VALID_GEMINI_VOICES.has(voiceName) ? voiceName : 'Fenrir';
+
+  const directedInput = `${accentCfg.ttsDirector}, with ${energyDesc}: ${text}`;
+  const ttsModels = [
+    'gemini-3.8-flash-lite-tts',
+    'gemini-3.8-flash-tts',
+    'gemini-2.5-flash-preview-tts',
+  ];
+
+  let lastErr = null;
+  for (const ttsModel of ttsModels) {
+    try {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${ttsModel}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [{ text: directedInput }],
+              },
+            ],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: chosenVoice,
+                  },
+                },
+              },
+            },
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        lastErr = new Error(`${ttsModel} returned HTTP ${res.status}: ${errText.slice(0, 200)}`);
+        continue;
+      }
+
+      const json = await res.json();
+      const parts = json?.candidates?.[0]?.content?.parts || [];
+      const audioPart = parts.find((p) => p?.inlineData?.data);
+      if (!audioPart?.inlineData?.data) {
+        lastErr = new Error(`${ttsModel} did not return audio data.`);
+        continue;
+      }
+
+      const mimeType = String(audioPart.inlineData.mimeType || 'audio/pcm;rate=24000');
+      const rawBuffer = Buffer.from(audioPart.inlineData.data, 'base64');
+
+      if (/pcm|L16/i.test(mimeType)) {
+        const rateMatch = mimeType.match(/rate=(\d+)/i);
+        const sampleRate = rateMatch ? Number(rateMatch[1]) : 24000;
+        const wavBuffer = pcmToWavBuffer(rawBuffer, sampleRate, 1, 16);
+        return {
+          audioBase64: wavBuffer.toString('base64'),
+          mimeType: 'audio/wav',
+          voiceName: chosenVoice,
+        };
+      }
+
+      return {
+        audioBase64: audioPart.inlineData.data,
+        mimeType,
+        voiceName: chosenVoice,
+      };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  throw lastErr || new Error('Gemini TTS failed across all models.');
+}
+
+app.post('/api/ai-mc/speak', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const eventType = String(body.eventType || 'hype').trim().toLowerCase();
+    const accent = AI_MC_ACCENT_STYLES[body.accent] ? body.accent : 'zim';
+    const energy = AI_MC_ENERGY_STYLES[body.energy] ? body.energy : 'hype';
+    const voiceName = VALID_GEMINI_VOICES.has(body.voiceName) ? body.voiceName : 'Fenrir';
+    const includeAudio = body.includeAudio !== false;
+
+    const apiKey = await getCachedGeminiApiKey();
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured on play-server.',
+      });
+    }
+
+    const params = {
+      eventType,
+      djName: typeof body.djName === 'string' ? body.djName.trim() : '',
+      mcName: typeof body.mcName === 'string' ? body.mcName.trim() : 'MC Tino',
+      aboutLive: typeof body.aboutLive === 'string' ? body.aboutLive.trim() : '',
+      accent,
+      energy,
+      voiceName,
+      viewerName: typeof body.viewerName === 'string' ? body.viewerName.trim() : '',
+      viewerNames: Array.isArray(body.viewerNames) ? body.viewerNames : [],
+      question: typeof body.question === 'string' ? body.question.trim() : '',
+      giftName: typeof body.giftName === 'string' ? body.giftName.trim() : '',
+      giftCount: Math.max(1, Number(body.giftCount) || 1),
+      giftCoins: Math.max(0, Number(body.giftCoins) || 0),
+      currentTrack: body.currentTrack && typeof body.currentTrack === 'object' ? body.currentTrack : null,
+      recentLines: Array.isArray(body.recentLines) ? body.recentLines : [],
+      customText: typeof body.customText === 'string' ? body.customText.trim() : '',
+    };
+
+    const text = await generateAIMCScript(apiKey, params);
+
+    if (!includeAudio) {
+      return res.json({
+        success: true,
+        text,
+        audioBase64: null,
+        voiceName,
+      });
+    }
+
+    try {
+      const tts = await synthesizeGeminiTTS(apiKey, text, { accent, energy, voiceName });
+      return res.json({
+        success: true,
+        text,
+        audioBase64: tts.audioBase64,
+        mimeType: tts.mimeType,
+        voiceName: tts.voiceName,
+      });
+    } catch (ttsErr) {
+      console.warn('[AI-MC] Gemini TTS fallback triggered:', ttsErr.message);
+      return res.json({
+        success: true,
+        text,
+        audioBase64: null,
+        voiceName,
+        ttsFallbackReason: ttsErr.message,
+      });
+    }
+  } catch (err) {
+    console.error('[AI-MC] Endpoint error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'AI MC request failed.',
+    });
+  }
+});
+
+// ============================================================================
+// AI MC Smart Host-Question Filter (Ignores viewer-to-viewer chatter)
+// ============================================================================
+
+app.post('/api/ai-mc/should-reply', async (req, res) => {
+  try {
+    const comment = typeof req.body?.comment === 'string' ? req.body.comment.trim() : '';
+    const viewerName = typeof req.body?.viewerName === 'string' ? req.body.viewerName.trim() : 'Viewer';
+    const djName = typeof req.body?.djName === 'string' ? req.body.djName.trim() : 'the DJ';
+    const hostHandle = typeof req.body?.hostHandle === 'string' ? req.body.hostHandle.trim() : '';
+    const mcName = typeof req.body?.mcName === 'string' ? req.body.mcName.trim() : 'MC Tino';
+    const aboutLive = typeof req.body?.aboutLive === 'string' ? req.body.aboutLive.trim().slice(0, 220) : '';
+    const currentTrack =
+      req.body?.currentTrack && typeof req.body.currentTrack === 'object'
+        ? `${req.body.currentTrack.artist || ''} - ${req.body.currentTrack.title || ''}`.replace(/^\s*-\s*|\s*-\s*$/g, '')
+        : '';
+    const recentMessages = Array.isArray(req.body?.recentMessages)
+      ? req.body.recentMessages
+          .slice(-6)
+          .map((m) => `${String(m?.sender || 'Viewer').slice(0, 24)}: ${String(m?.text || '').slice(0, 120)}`)
+      : [];
+
+    if (comment.length < 2 || comment.length > 280) {
+      return res.json({ success: true, shouldReply: false, reason: 'Empty or invalid comment' });
+    }
+
+    const apiKey = await getCachedGeminiApiKey();
+    if (!apiKey) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on play-server.' });
+    }
+
+    const hostAliases = [djName, mcName, hostHandle ? `@${hostHandle.replace(/^@+/, '')}` : '']
+      .filter(Boolean)
+      .join(', ');
+
+    const prompt = [
+      `You are a strict live-chat gatekeeper for a TikTok LIVE DJ stream.`,
+      `Host / DJ / MC names: ${hostAliases || 'DJ, MC'}.`,
+      aboutLive ? `Live description: ${aboutLive}` : '',
+      currentTrack ? `Now playing: ${currentTrack}` : '',
+      recentMessages.length > 0 ? `Recent chat messages (oldest to newest):\n${recentMessages.join('\n')}` : '',
+      `New comment from viewer "${viewerName}": "${comment}"`,
+      `Decide if the AI MC should reply OUT LOUD on the microphone.`,
+      `Reply TRUE ONLY when ALL of the following are true:`,
+      `1. The comment is a genuine question or direct inquiry (in English, Shona, Ndebele, Zulu, etc.) expecting an answer.`,
+      `2. It is clearly directed to the HOST, DJ, MC, the stream/live itself, the music/track playing, how to request songs/gifts, or the DJ's setup/location/schedule (e.g. "what song is this?", "where are you streaming from?", "how do I request?", "DJ unogara kupi?", "ngoma iyi inonzi ani?", "how many coins?", "wakadii DJ?").`,
+      `Reply FALSE when ANY of the following is true:`,
+      `- The viewer is talking to ANOTHER viewer (mentions another person's name or @handle that is not the host/DJ/MC, e.g. "Chido where are you?", "@Jossy did you eat?", "Tino are you coming?").`,
+      `- The viewer is replying to another viewer's message in the recent chat log (viewer-to-viewer conversation).`,
+      `- It is a casual question to the general chatroom about off-topic personal stuff ("guys who won the match?", "anyone from Gweru?").`,
+      `- It is NOT a question at all (statement, compliment, greeting to nobody in particular, laughter, banter, hype like "fire", "vibes", "lol").`,
+      `- You are unsure if it's meant for the host — when in doubt, prefer FALSE so the MC doesn't interrupt viewers talking to each other.`,
+      `Return STRICT JSON only: {"shouldReply": true|false, "reason": "max 6 words"}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const models = ['gemini-3.1-flash-lite', 'gemini-2.5-flash-lite', 'gemini-3.8-flash', 'gemini-flash-latest'];
+    for (const model of models) {
+      const genConfigs = [
+        {
+          temperature: 0,
+          maxOutputTokens: 96,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+        {
+          temperature: 0,
+          maxOutputTokens: 128,
+          responseMimeType: 'application/json',
+        },
+      ];
+
+      for (const generationConfig of genConfigs) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig,
+              }),
+            }
+          );
+
+          if (!response.ok) {
+            if (response.status !== 400) break;
+            continue;
+          }
+
+          const json = await response.json();
+          const rawText = (json?.candidates?.[0]?.content?.parts || [])
+            .filter((p) => p && !p.thought && typeof p.text === 'string')
+            .map((p) => p.text)
+            .join(' ')
+            .trim();
+
+          if (!rawText) break;
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+          return res.json({
+            success: true,
+            shouldReply: parsed?.shouldReply === true,
+            reason: typeof parsed?.reason === 'string' ? parsed.reason.trim().slice(0, 80) : '',
+          });
+        } catch (err) {
+          console.warn(`[AI-MC Filter] Model ${model} attempt failed:`, err.message);
+          break;
+        }
+      }
+    }
+
+    // Safe fallback if all models fail: skip rather than spam viewer banter
+    return res.json({ success: true, shouldReply: false, reason: 'Classifier unavailable' });
+  } catch (err) {
+    console.error('[AI-MC Filter] Endpoint error:', err.message);
+    return res.status(500).json({ success: false, shouldReply: false, error: err.message || 'Filter failed.' });
+  }
+});
+
+// ============================================================================
+// AI Song Request Intent Parser (Natural English & Shona + VIP Custom AI Songs)
+// ============================================================================
+
+app.post('/api/ai-song-intent', async (req, res) => {
+  try {
+    const comment = typeof req.body?.comment === 'string' ? req.body.comment.trim() : '';
+    const viewerName = typeof req.body?.viewerName === 'string' ? req.body.viewerName.trim() : 'Viewer';
+    const djName = typeof req.body?.djName === 'string' ? req.body.djName.trim() : 'the DJ';
+    const allowCustomAiSong = req.body?.allowCustomAiSong !== false;
+
+    if (comment.length < 3 || comment.length > 260) {
+      return res.json({ success: true, intent: 'none' });
+    }
+
+    const apiKey = await getCachedGeminiApiKey();
+    if (!apiKey) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on play-server.' });
+    }
+
+    const prompt = [
+      `You are an intent classifier for a live TikTok DJ stream hosted by DJ ${djName}.`,
+      `Viewer "${viewerName}" wrote this comment in live chat: "${comment}"`,
+      `Classify it into ONE of three intents:`,
+      `1. "play_song": The viewer is asking the DJ to play an existing song or artist (in English, Shona, Ndebele, Zulu, etc. — e.g. "DJ play Winky D Ijipita", "Ndirikuda kunzwa Macheso", "Tidzire Jah Prayzah Kutonga Kwaro", "Drop some Kabza De Small next", "Can you put on Chris Brown?"). Extract a clean searchable "query" (artist + song title, fixing obvious spelling typos if clear).`,
+      allowCustomAiSong
+        ? `2. "create_ai_song": The viewer is explicitly asking to CREATE / MAKE / GENERATE a brand-new original custom AI song (e.g. "Make a Zimdancehall birthday song for Jossy in Harare", "Create an Amapiano shoutout song for me", "Gadzira ngoma yekubirthday kwaTino"). Generate a crisp "songTitle" (max 45 chars), "style" (genre), and rich "aiPrompt" (1-2 sentences suitable for a music generator).`
+        : `2. Custom AI song creation is currently disabled — do NOT return "create_ai_song".`,
+      `3. "none": Normal chat, greeting, compliment, question ("what song is playing?", "where are you from?"), or non-music mention of "play" (e.g. "I play soccer", "don't play with me").`,
+      `Return STRICT JSON only with keys: {"intent":"play_song"|"create_ai_song"|"none","query":"","songTitle":"","aiPrompt":"","style":""}`,
+    ].join('\n');
+
+    const models = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
+    for (const model of models) {
+      const genConfigs = [
+        {
+          temperature: 0.1,
+          maxOutputTokens: 256,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+        {
+          temperature: 0.1,
+          maxOutputTokens: 512,
+          responseMimeType: 'application/json',
+        },
+      ];
+
+      for (const generationConfig of genConfigs) {
+        try {
+          const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig,
+              }),
+            }
+          );
+
+          if (!response.ok) {
+            if (response.status !== 400) break;
+            continue;
+          }
+
+          const json = await response.json();
+          const rawText = (json?.candidates?.[0]?.content?.parts || [])
+            .filter((p) => p && !p.thought && typeof p.text === 'string')
+            .map((p) => p.text)
+            .join(' ')
+            .trim();
+
+          if (!rawText) break;
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawText);
+
+          let intent = parsed?.intent === 'play_song' || parsed?.intent === 'create_ai_song' ? parsed.intent : 'none';
+          if (intent === 'create_ai_song' && !allowCustomAiSong) {
+            intent = 'none';
+          }
+
+          const query = typeof parsed?.query === 'string' ? parsed.query.trim().slice(0, 120) : '';
+          const songTitle = typeof parsed?.songTitle === 'string' ? parsed.songTitle.trim().slice(0, 60) : '';
+          const aiPrompt = typeof parsed?.aiPrompt === 'string' ? parsed.aiPrompt.trim().slice(0, 320) : '';
+          const style = typeof parsed?.style === 'string' ? parsed.style.trim().slice(0, 40) : '';
+
+          if (intent === 'play_song' && query.length < 2) {
+            return res.json({ success: true, intent: 'none' });
+          }
+          if (intent === 'create_ai_song' && aiPrompt.length < 5) {
+            return res.json({ success: true, intent: 'none' });
+          }
+
+          return res.json({
+            success: true,
+            intent,
+            query,
+            songTitle,
+            aiPrompt,
+            style,
+          });
+        } catch (err) {
+          console.warn(`[AI-SongIntent] Model ${model} attempt failed:`, err.message);
+          break;
+        }
+      }
+    }
+
+    return res.json({ success: true, intent: 'none' });
+  } catch (err) {
+    console.error('[AI-SongIntent] Endpoint error:', err.message);
+    return res.status(500).json({ success: false, error: err.message || 'Intent classification failed.' });
+  }
+});
+
+// One-shot VIP Live AI Song Creation (Lyria 3 Pro -> Firebase Storage -> Firestore -> ready to play on decks)
+app.post('/api/generate-and-save-ai-song', async (req, res) => {
+  try {
+    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+    if (prompt.length < 4) {
+      return res.status(400).json({ success: false, error: 'Provide a prompt for the custom AI song.' });
+    }
+
+    const sanitizedUser =
+      typeof req.body?.user === 'string' && req.body.user.trim()
+        ? req.body.user.trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64)
+        : 'live_ai_song';
+
+    const firestoreOwnerId =
+      typeof req.body?.ownerId === 'string' && req.body.ownerId.trim()
+        ? req.body.ownerId.trim()
+        : sanitizedUser;
+
+    const requestedBy =
+      typeof req.body?.requestedBy === 'string' && req.body.requestedBy.trim()
+        ? req.body.requestedBy.trim().slice(0, 50)
+        : 'VIP Fan';
+
+    const artistName =
+      typeof req.body?.artistName === 'string' && req.body.artistName.trim()
+        ? req.body.artistName.trim().slice(0, 60)
+        : 'PlayMyJam AI';
+
+    const songTitle =
+      typeof req.body?.songTitle === 'string' && req.body.songTitle.trim()
+        ? req.body.songTitle.trim().slice(0, 60)
+        : `Custom Song for ${requestedBy}`;
+
+    const location =
+      typeof req.body?.location === 'string' && req.body.location.trim()
+        ? req.body.location.trim()
+        : 'TikTok LIVE';
+
+    const apiKey = await getCachedGeminiApiKey();
+    if (!apiKey) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured on play-server.' });
+    }
+
+    console.log(`✨ [LiveAISong] Generating Lyria 3 track for @${requestedBy}: "${songTitle}" | prompt="${prompt.slice(0, 120)}"`);
+
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify({
+        model: 'lyria-3-pro-preview',
+        input: prompt,
+        response_format: {
+          type: 'audio',
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      console.error(`[LiveAISong] Lyria 3 API error (${response.status}): ${errorText.slice(0, 300)}`);
+      return res.status(response.status).json({
+        success: false,
+        error: `AI music generation failed (HTTP ${response.status}).`,
+      });
+    }
+
+    const responseJson = await response.json();
+    let audioBase64 = null;
+    if (responseJson.steps && Array.isArray(responseJson.steps)) {
+      for (const step of responseJson.steps) {
+        if (step.type === 'model_output' && Array.isArray(step.content)) {
+          for (const contentBlock of step.content) {
+            if (contentBlock.type === 'audio' && contentBlock.data) {
+              audioBase64 = contentBlock.data;
+            }
+          }
+        }
+      }
+    }
+
+    if (!audioBase64) {
+      return res.status(502).json({
+        success: false,
+        error: 'Lyria 3 did not return audio data for this prompt.',
+      });
+    }
+
+    const audioBuffer = Buffer.from(audioBase64, 'base64');
+
+    let trackDurationSeconds = 0;
+    try {
+      const metadata = await parseBuffer(audioBuffer, 'audio/mpeg');
+      trackDurationSeconds = Math.round(metadata?.format?.duration || 0);
+    } catch (metaErr) {
+      console.warn(`[LiveAISong] Could not parse MP3 duration: ${metaErr.message}`);
+    }
+
+    const musicId = `music_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+    const sanitizeFilename = (name) => name.replace(/[^a-zA-Z0-9\s._-]/g, '').trim();
+    const cleanArtist = sanitizeFilename(artistName) || 'PlayMyJam AI';
+    const cleanTitle = sanitizeFilename(songTitle) || 'Live AI Track';
+    const finalFileName = `${cleanArtist} - ${cleanTitle}.mp3`;
+
+    const storagePath = `music/${sanitizedUser}/${musicId}_audio.mp3`;
+    const storageRef = ref(firebaseStorage, storagePath);
+
+    console.log(`☁️ [LiveAISong] Uploading custom AI MP3 to Firebase Storage: ${storagePath}`);
+    await uploadBytes(storageRef, audioBuffer, { contentType: 'audio/mpeg' });
+    const audioUrl = await getDownloadURL(storageRef);
+
+    const musicData = {
+      id: musicId,
+      title: songTitle,
+      artist: `${artistName} (for ${requestedBy})`,
+      active: true,
+      genres: 'AI',
+      albumArt: 'https://mrdocs.empiredigitals.org/playIcon.png',
+      audioUrl,
+      url: audioUrl,
+      duration: trackDurationSeconds,
+      ownerId: firestoreOwnerId,
+      uploadDate: new Date().toISOString(),
+      playCount: 0,
+      fileName: finalFileName,
+      currentBid: 0,
+      fingerprint: randomUUID(),
+      titleLowerCase: songTitle.toLowerCase(),
+      artistLowerCase: `${artistName} (for ${requestedBy})`.toLowerCase(),
+      albumLowerCase: '',
+      location,
+      externalSource: 'ai',
+      externalSourceId: `ai_${musicId}`,
+    };
+
+    const trackData = {
+      ...musicData,
+      ownerId: '',
+      freePlays: 0,
+      premiumPlays: 0,
+      creditPlays: 0,
+      creditPlaysClaimed: 0,
+    };
+
+    await Promise.all([
+      setDoc(doc(firestoreDb, 'music', musicId), musicData),
+      setDoc(doc(firestoreDb, 'tracks', musicId), trackData),
+    ]);
+
+    console.log(`✅ [LiveAISong] Saved custom AI track: ${musicData.artist} - ${musicData.title} (${musicId})`);
+
+    return res.json({
+      success: true,
+      message: 'Custom AI track created and saved to Firebase!',
+      data: musicData,
+    });
+  } catch (err) {
+    console.error('[LiveAISong] Endpoint error:', err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Failed to generate custom AI song.',
+    });
   }
 });
 

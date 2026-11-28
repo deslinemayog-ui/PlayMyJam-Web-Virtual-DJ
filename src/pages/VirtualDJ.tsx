@@ -3,6 +3,7 @@ import { useMusicPlayer } from '@/hooks/useMusicPlayer';
 import { useAudioLogic } from '@/hooks/useAudioLogic';
 import { useAutoDJ } from '@/hooks/useAutoDJ';
 import { useTikTokLive } from '@/hooks/useTikTokLive';
+import { useAIMC } from '@/hooks/useAIMC';
 import { usePioneerController } from '@/hooks/usePioneerController';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDispatch, useSelector } from 'react-redux';
@@ -16,7 +17,9 @@ import DeckA from '@/components/virtualDJ/DeckA';
 import DeckB from '@/components/virtualDJ/DeckB';
 import MixerPanel from '@/components/virtualDJ/MixerPanel';
 import MusicLibrary from '@/components/virtualDJ/MusicLibrary';
+import AutoDJPanel from '@/components/virtualDJ/AutoDJPanel';
 import TikTokLiveModal from '@/components/virtualDJ/TikTokLiveModal';
+import AIMCModal from '@/components/virtualDJ/AIMCModal';
 import PioneerHardwareModal from '@/components/virtualDJ/PioneerHardwareModal';
 // import AirDJHUD from '@/components/virtualDJ/AirDJHUD';
 import { getSecretKeys } from '@/api';
@@ -42,6 +45,8 @@ const VirtualDJ = () => {
     // Controls
     loadTrackToDeckA,
     loadTrackToDeckB,
+    playDeckA,
+    playDeckB,
     pauseDeckA,
     pauseDeckB,
     stopDeckA,
@@ -114,18 +119,25 @@ const VirtualDJ = () => {
     refreshAudioDevices,
     maxOutputChannels,
     audioRoutingError,
+    setTalkoverDuck,
   } = useMusicPlayer();
 
-  // Audio logic for song status updates
-  const { handleSongUpdate } = useAudioLogic(djSongs || []);
+  // Audio logic for song status updates & PlayMyJam bid settlement
+  const { handleSongUpdate, clearCurrentBid } = useAudioLogic(djSongs || []);
 
   // Disco lights toggle state
   const [discoLightsEnabled, setDiscoLightsEnabled] = useState(true);
   // Air DJ motion control state
   const [airDJEnabled, setAirDJEnabled] = useState(false);
+  // Auto DJ modal state
+  const [showAutoDJModal, setShowAutoDJModal] = useState(false);
   // TikTok Live Gifts & Chats modal state
   const [showTikTokModal, setShowTikTokModal] = useState(false);
   const [isTikTokModalCollapsed, setIsTikTokModalCollapsed] = useState(false);
+  // AI MC Studio modal state
+  const [showAIMCModal, setShowAIMCModal] = useState(false);
+  const [isTikTokConnectedForMC, setIsTikTokConnectedForMC] = useState(false);
+  const [tikTokHostHandleForMC, setTikTokHostHandleForMC] = useState('');
   // Pioneer DJ / MIDI Hardware modal state
   const [showHardwareModal, setShowHardwareModal] = useState(false);
 
@@ -134,41 +146,65 @@ const VirtualDJ = () => {
     setIsTikTokModalCollapsed(false);
   };
 
+  // Live refs so enhancedToggleDeckA/B stay referentially stable across timeupdate ticks
+  const deckAStateRef = useRef(deckA);
+  const deckBStateRef = useRef(deckB);
+  const notifyManualDeckLoadRef = useRef<((deck: 'A' | 'B', songId: string) => void) | null>(null);
+  const consumeTikTokRequestRef = useRef<((songId: string, deck?: 'A' | 'B') => void) | null>(null);
+  deckAStateRef.current = deckA;
+  deckBStateRef.current = deckB;
+
+  const handleManualLoadDeckA = useCallback(
+    (song: Song, autoPlay = false) => {
+      notifyManualDeckLoadRef.current?.('A', song.id);
+      loadTrackToDeckA(song, autoPlay);
+    },
+    [loadTrackToDeckA]
+  );
+
+  const handleManualLoadDeckB = useCallback(
+    (song: Song, autoPlay = false) => {
+      notifyManualDeckLoadRef.current?.('B', song.id);
+      loadTrackToDeckB(song, autoPlay);
+    },
+    [loadTrackToDeckB]
+  );
+
   // Play a TikTok-requested song immediately on the chosen or idle deck
   const playTikTokSongNow = useCallback(
     (song: Song, preferredDeck?: 'A' | 'B'): 'A' | 'B' => {
       const targetDeck: 'A' | 'B' =
-        preferredDeck ?? (!deckA?.isPlaying ? 'A' : !deckB?.isPlaying ? 'B' : 'A');
+        preferredDeck ?? (!deckAStateRef.current?.isPlaying ? 'A' : !deckBStateRef.current?.isPlaying ? 'B' : 'A');
 
       if (targetDeck === 'A') {
-        if (deckB?.isPlaying) {
+        if (deckBStateRef.current?.isPlaying) {
           pauseDeckB();
         }
         if (crossfader > 60) {
           updateCrossfader(0);
         }
-        loadTrackToDeckA(song, true);
+        consumeTikTokRequestRef.current?.(song.id, 'A');
+        handleManualLoadDeckA(song, true);
         return 'A';
       }
 
-      if (deckA?.isPlaying) {
+      if (deckAStateRef.current?.isPlaying) {
         pauseDeckA();
       }
       if (crossfader < 40) {
         updateCrossfader(100);
       }
-      loadTrackToDeckB(song, true);
+      consumeTikTokRequestRef.current?.(song.id, 'B');
+      handleManualLoadDeckB(song, true);
       return 'B';
     },
     [
-      deckA?.isPlaying,
-      deckB?.isPlaying,
       crossfader,
       pauseDeckA,
       pauseDeckB,
       updateCrossfader,
-      loadTrackToDeckA,
-      loadTrackToDeckB,
+      handleManualLoadDeckA,
+      handleManualLoadDeckB,
     ]
   );
 
@@ -216,15 +252,62 @@ const VirtualDJ = () => {
     [deckA?.currentTrack?.id, deckB?.currentTrack?.id, stopDeckA, stopDeckB, dispatch]
   );
 
+  // Determine active playing track for AI MC Q&A ("what song is this?") and track shoutouts
+  const activePlayingTrack = useMemo(() => {
+    const trackA = deckA?.currentTrack;
+    const trackB = deckB?.currentTrack;
+    if (deckA?.isPlaying && deckB?.isPlaying && trackA && trackB) {
+      const chosen = crossfader > 55 ? trackB : trackA;
+      return { id: chosen.id, title: chosen.title, artist: chosen.artist };
+    }
+    if (deckA?.isPlaying && trackA) {
+      return { id: trackA.id, title: trackA.title, artist: trackA.artist };
+    }
+    if (deckB?.isPlaying && trackB) {
+      return { id: trackB.id, title: trackB.title, artist: trackB.artist };
+    }
+    const fallback = trackA || trackB;
+    return fallback ? { id: fallback.id, title: fallback.title, artist: fallback.artist } : null;
+  }, [deckA?.isPlaying, deckA?.currentTrack, deckB?.isPlaying, deckB?.currentTrack, crossfader]);
+
+  const djDisplayName = user?.djInfo?.djName || user?.fname || 'DJ';
+  const geminiApiKey = useSelector(
+    (state: RootState) => state.globalVariables?.secrets?.GEMINI_API_KEY || ''
+  );
+
+  // AI MC Live Host (Real-time Gemini Live Native Audio WebSocket + Credit Protections + Auto-Ducking)
+  const aiMC = useAIMC({
+    djName: djDisplayName,
+    hostHandle: tikTokHostHandleForMC,
+    geminiApiKey,
+    isModalOpen: showAIMCModal,
+    isTikTokConnected: isTikTokConnectedForMC,
+    currentTrack: activePlayingTrack,
+    onDuckMusic: setTalkoverDuck,
+  });
+
   const tiktokLive = useTikTokLive({
     songs: djSongs || [],
     ownerId: djOwnerId,
     userFolder: djFolderName,
+    djName: djDisplayName,
     deckState: tiktokDeckState,
     onAutoPlayRequest: (song) => playTikTokSongNow(song),
     onStopSong: stopRejectedSong,
     onPlaySoundEffect: playSoundEffect,
+    onMemberJoin: aiMC.handleMemberJoin,
+    onViewerChat: aiMC.handleViewerChat,
+    onFinalGift: aiMC.handleFinalGift,
+    onSocialEvent: aiMC.handleSocialEvent,
+    onSongRequestFeedback: aiMC.handleSongRequestFeedback,
   });
+
+  consumeTikTokRequestRef.current = tiktokLive.consumeSongRequest;
+
+  useEffect(() => {
+    setIsTikTokConnectedForMC(tiktokLive.isConnected);
+    setTikTokHostHandleForMC(tiktokLive.status.uniqueId || tiktokLive.config.username || '');
+  }, [tiktokLive.isConnected, tiktokLive.status.uniqueId, tiktokLive.config.username]);
 
   // Reset decks on page load to prevent state/audio desync
   useEffect(() => {
@@ -264,52 +347,64 @@ const VirtualDJ = () => {
     };
   }, []);
 
-  // Enhanced toggle functions that update song status
-  const enhancedToggleDeckA = async () => {
-    const wasPlaying = deckA?.isPlaying;
-    const currentTrack = deckA?.currentTrack;
+  // Stable enhanced toggle functions that update song status without churning dependencies on every timeupdate
+  const enhancedToggleDeckA = useCallback(async () => {
+    const current = deckAStateRef.current;
+    const wasPlaying = current?.isPlaying;
+    const currentTrack = current?.currentTrack;
 
-    // Call the original toggle function
     toggleDeckA();
 
-    // Update song status if there's a current track
     if (currentTrack) {
       const action = wasPlaying ? 'pause' : 'play';
-      const position = deckA?.position || 0;
+      const position = current?.position || 0;
       await handleSongUpdate(currentTrack, action, position);
     }
-  };
+  }, [toggleDeckA, handleSongUpdate]);
 
-  const enhancedToggleDeckB = async () => {
-    const wasPlaying = deckB?.isPlaying;
-    const currentTrack = deckB?.currentTrack;
+  const enhancedToggleDeckB = useCallback(async () => {
+    const current = deckBStateRef.current;
+    const wasPlaying = current?.isPlaying;
+    const currentTrack = current?.currentTrack;
 
-    // Call the original toggle function
     toggleDeckB();
 
-    // Update song status if there's a current track
     if (currentTrack) {
       const action = wasPlaying ? 'pause' : 'play';
-      const position = deckB?.position || 0;
+      const position = current?.position || 0;
       await handleSongUpdate(currentTrack, action, position);
     }
-  };
+  }, [toggleDeckB, handleSongUpdate]);
 
-  // Auto DJ functionality (safely prioritizes TikTok gift-backed requests in memory without mutating Firestore)
+  const tiktokQueuedSongs = useMemo(
+    () => tiktokLive.activeSongRequests.map((r) => r.song),
+    [tiktokLive.activeSongRequests]
+  );
+
+  // Auto DJ functionality (safely prioritizes TikTok/AI requests in memory without mutating Firestore)
   const autoDJ = useAutoDJ({
     songs: djSongs || [],
     deckA,
     deckB,
     loadTrackToDeckA,
     loadTrackToDeckB,
+    playDeckA,
+    pauseDeckA,
+    playDeckB,
+    pauseDeckB,
     toggleDeckA: enhancedToggleDeckA,
     toggleDeckB: enhancedToggleDeckB,
     updateCrossfader,
     crossfader,
     handleSongUpdate,
+    onClearSongBid: clearCurrentBid,
     tiktokRequestCoinsBySongId: tiktokLive.tiktokRequestCoinsBySongId,
+    tiktokQueuedSongs,
     onConsumeTikTokRequest: tiktokLive.consumeSongRequest,
+    onFinishTikTokRequest: tiktokLive.markSongRequestPlayed,
   });
+
+  notifyManualDeckLoadRef.current = autoDJ.notifyManualDeckLoad;
 
   // Load the top priority TikTok/PlayMyJam track onto a deck (triggered by Pioneer Load A / Load B buttons)
   const loadTopQueueTrackToDeck = useCallback(
@@ -333,9 +428,9 @@ const VirtualDJ = () => {
 
       if (!candidate) return;
       if (deck === 'A') {
-        loadTrackToDeckA(candidate);
+        handleManualLoadDeckA(candidate);
       } else {
-        loadTrackToDeckB(candidate);
+        handleManualLoadDeckB(candidate);
       }
       if (tiktokLive.nextQueuedRequest?.song?.id === candidate.id) {
         tiktokLive.markSongRequestLoaded(candidate.id, deck);
@@ -347,8 +442,8 @@ const VirtualDJ = () => {
       tiktokLive,
       autoDJ.nextSong,
       djSongs,
-      loadTrackToDeckA,
-      loadTrackToDeckB,
+      handleManualLoadDeckA,
+      handleManualLoadDeckB,
     ]
   );
 
@@ -429,24 +524,32 @@ const VirtualDJ = () => {
 
     prevDeckPlayingRef.current = { a: aPlaying, b: bPlaying };
 
+    if (aEndedNaturally && deckA?.currentTrack?.id) {
+      tiktokLive.markSongRequestPlayed(deckA.currentTrack.id);
+    }
+    if (bEndedNaturally && deckB?.currentTrack?.id) {
+      tiktokLive.markSongRequestPlayed(deckB.currentTrack.id);
+    }
+
     if (
       !autoDJ.autoDJState.isEnabled &&
-      tiktokLive.isConnected &&
       tiktokLive.config.autoPlayRequests &&
       tiktokLive.nextQueuedRequest &&
       !aPlaying &&
       !bPlaying
     ) {
-      if (aEndedNaturally) {
+      if (aEndedNaturally && tiktokLive.nextQueuedRequest.song.id !== deckA?.currentTrack?.id) {
         playTikTokSongNow(tiktokLive.nextQueuedRequest.song, 'B');
-      } else if (bEndedNaturally) {
+      } else if (bEndedNaturally && tiktokLive.nextQueuedRequest.song.id !== deckB?.currentTrack?.id) {
         playTikTokSongNow(tiktokLive.nextQueuedRequest.song, 'A');
       }
     }
   }, [
+    deckA?.currentTrack?.id,
     deckA?.isPlaying,
     deckA?.position,
     deckA?.duration,
+    deckB?.currentTrack?.id,
     deckB?.isPlaying,
     deckB?.position,
     deckB?.duration,
@@ -454,6 +557,7 @@ const VirtualDJ = () => {
     tiktokLive.isConnected,
     tiktokLive.config.autoPlayRequests,
     tiktokLive.nextQueuedRequest,
+    tiktokLive.markSongRequestPlayed,
     playTikTokSongNow,
   ]);
 
@@ -486,20 +590,17 @@ const VirtualDJ = () => {
             isTikTokConnected={tiktokLive.isConnected}
             tiktokViewerCount={tiktokLive.viewerCount}
             onOpenTikTokModal={handleOpenTikTokModal}
+            isAIMCEnabled={aiMC.config.enabled}
+            isAIMCSpeaking={aiMC.isSpeaking || aiMC.isGenerating}
+            onOpenAIMCModal={() => setShowAIMCModal(true)}
             isHardwareConnected={pioneerController.isHardwareConnected}
             hardwareDeviceName={pioneerController.primaryDevice?.name}
             onOpenHardwareModal={() => setShowHardwareModal(true)}
-            autoDJState={autoDJ.autoDJState}
-            currentSong={autoDJ.currentSong}
-            nextSong={autoDJ.nextSong}
-            timeRemaining={autoDJ.timeRemaining}
-            startAutoDJ={autoDJ.startAutoDJ}
-            stopAutoDJ={autoDJ.stopAutoDJ}
-            skipToNext={autoDJ.skipToNext}
+            isAutoDJEnabled={autoDJ.autoDJState.isEnabled}
+            isAutoDJTransitioning={autoDJ.autoDJState.isTransitioning}
+            onOpenAutoDJModal={() => setShowAutoDJModal(true)}
             airDJEnabled={airDJEnabled}
             onToggleAirDJ={setAirDJEnabled}
-            updateTransitionDuration={autoDJ.updateTransitionDuration}
-            updateCrossfadeSpeed={autoDJ.updateCrossfadeSpeed}
           />
 
           {/* Main DJ Interface */}
@@ -524,7 +625,7 @@ const VirtualDJ = () => {
                   jumpToCue={jumpToDeckACue}
                   beatJump={beatJumpDeckA}
                   discoLightsEnabled={discoLightsEnabled}
-                  onLoadTrack={loadTrackToDeckA}
+                  onLoadTrack={handleManualLoadDeckA}
                 />
               </div>
 
@@ -551,8 +652,8 @@ const VirtualDJ = () => {
                 <MusicLibrary
                   songs={djSongs || []}
                   isLoadingSongs={isLoadingSongs}
-                  loadTrackToDeckA={loadTrackToDeckA}
-                  loadTrackToDeckB={loadTrackToDeckB}
+                  loadTrackToDeckA={handleManualLoadDeckA}
+                  loadTrackToDeckB={handleManualLoadDeckB}
                   tiktokRequestCoinsBySongId={tiktokLive.tiktokRequestCoinsBySongId}
                   ownerId={djOwnerId}
                   userFolder={djFolderName}
@@ -581,12 +682,28 @@ const VirtualDJ = () => {
                   jumpToCue={jumpToDeckBCue}
                   beatJump={beatJumpDeckB}
                   discoLightsEnabled={discoLightsEnabled}
-                  onLoadTrack={loadTrackToDeckB}
+                  onLoadTrack={handleManualLoadDeckB}
                 />
               </div>
             </div>
           </div>
         </div>
+
+        {/* Auto DJ Centered Modal */}
+        <AutoDJPanel
+          isOpen={showAutoDJModal}
+          onClose={() => setShowAutoDJModal(false)}
+          autoDJState={autoDJ.autoDJState}
+          currentSong={autoDJ.currentSong}
+          nextSong={autoDJ.nextSong}
+          timeRemaining={autoDJ.timeRemaining}
+          pendingRequestsCount={tiktokLive.activeSongRequests.length}
+          startAutoDJ={autoDJ.startAutoDJ}
+          stopAutoDJ={autoDJ.stopAutoDJ}
+          skipToNext={autoDJ.skipToNext}
+          updateTransitionDuration={autoDJ.updateTransitionDuration}
+          updateCrossfadeSpeed={autoDJ.updateCrossfadeSpeed}
+        />
 
         {/* TikTok LIVE Gifts, Chats & Song Requests Modal */}
         <TikTokLiveModal
@@ -599,8 +716,36 @@ const VirtualDJ = () => {
           }}
           live={tiktokLive}
           onPlaySongNow={(song) => playTikTokSongNow(song)}
-          onLoadToDeckA={loadTrackToDeckA}
-          onLoadToDeckB={loadTrackToDeckB}
+          onLoadToDeckA={handleManualLoadDeckA}
+          onLoadToDeckB={handleManualLoadDeckB}
+        />
+
+        {/* AI MC Studio Modal (Zimbabwean Hype MC + Gemini AI Voice + Offline Song Request Simulator) */}
+        <AIMCModal
+          isOpen={showAIMCModal}
+          onClose={() => setShowAIMCModal(false)}
+          aiMC={aiMC}
+          isTikTokConnected={tiktokLive.isConnected}
+          onOpenTikTokModal={handleOpenTikTokModal}
+          onSimulateRequestComment={(viewerName, comment, grantVipCoins) => {
+            if (!aiMC.config.enabled) {
+              aiMC.updateConfig({ enabled: true });
+            }
+            if (grantVipCoins > 0) {
+              tiktokLive.creditViewerCoinsSilently({
+                uniqueId: viewerName,
+                nickname: viewerName,
+                coins: grantVipCoins,
+              });
+            }
+            tiktokLive.simulateChat({
+              uniqueId: viewerName,
+              nickname: viewerName,
+              comment,
+            });
+          }}
+          activeRequestNotice={tiktokLive.lastRequestNotice?.message || ''}
+          searchingQueries={tiktokLive.searchingQueries}
         />
 
         {/* Pioneer DJ & MIDI Hardware + 4-Ch Audio / Headphone Cue Modal */}

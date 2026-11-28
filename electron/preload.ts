@@ -12,6 +12,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   scanMusic: () => ipcRenderer.invoke('scan-music'),
   downloadTrack: (payload: { url: string; fileName?: string }) =>
     ipcRenderer.invoke('download-track', payload),
+  fetchLocalExternalSong: (payload: {
+    query?: string;
+    videoId?: string;
+    title?: string;
+    artist?: string;
+    duration?: number;
+    thumbnail?: string;
+    ownerId?: string;
+    user?: string;
+    location?: string;
+    uploadBaseUrl?: string;
+  }) => ipcRenderer.invoke('fetch-local-external-song', payload),
   storeGet: (key: string) => ipcRenderer.invoke('store-get', key),
   storeSet: (key: string, value: string) => ipcRenderer.invoke('store-set', key, value),
   storeDelete: (key: string) => ipcRenderer.invoke('store-delete', key),
@@ -32,6 +44,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onChat: (callback: (chat: unknown) => void) => subscribe('tiktok:chat', callback),
     onLike: (callback: (like: unknown) => void) => subscribe('tiktok:like', callback),
     onSocial: (callback: (social: unknown) => void) => subscribe('tiktok:social', callback),
+    onMember: (callback: (member: unknown) => void) => subscribe('tiktok:member', callback),
     onRoomStats: (callback: (stats: unknown) => void) => subscribe('tiktok:roomStats', callback),
   },
 });

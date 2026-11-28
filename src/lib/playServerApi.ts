@@ -3,6 +3,7 @@ import type {
   TikTokChatEvent,
   TikTokGiftEvent,
   TikTokLikeEvent,
+  TikTokMemberEvent,
   TikTokRoomStatsEvent,
   TikTokSocialEvent,
   TikTokStatusEvent,
@@ -116,6 +117,13 @@ export interface FetchExternalSongResponse {
   success: boolean;
   cached?: boolean;
   message?: string;
+  candidate?: {
+    videoId: string;
+    title: string;
+    artist: string;
+    duration?: number;
+    thumbnail?: string;
+  } | null;
   data: {
     id: string;
     title: string;
@@ -128,8 +136,26 @@ export interface FetchExternalSongResponse {
     fileName?: string;
     externalSource?: string;
     externalSourceId?: string;
-  };
+  } | null;
   error?: string;
+}
+
+function toPlayableSong(d: NonNullable<FetchExternalSongResponse['data']>): Song {
+  return {
+    id: d.id,
+    title: d.title || 'Untitled Track',
+    artist: d.artist || 'Unknown Artist',
+    albumArt: d.albumArt || 'https://mrdocs.empiredigitals.org/playIcon.png',
+    url: d.url || d.audioUrl,
+    audioUrl: d.audioUrl || d.url,
+    duration: Number(d.duration) || 0,
+    ownerId: d.ownerId || '',
+    active: true,
+    currentBid: 0,
+    action: 'stop',
+    isPlaying: false,
+    isSuggested: false,
+  };
 }
 
 export async function searchExternalSongs(
@@ -158,44 +184,73 @@ export async function fetchAndSaveExternalSong(params: {
   user?: string;
   location?: string;
 }): Promise<{ song: Song; cached: boolean }> {
-  const res = await postPlayServerJson<FetchExternalSongResponse>(
-    '/api/fetch-song',
-    {
-      query: params.query?.trim() || undefined,
-      videoId: params.videoId?.trim() || undefined,
-      title: params.title?.trim() || undefined,
-      artist: params.artist?.trim() || undefined,
-      duration: params.duration || undefined,
-      thumbnail: params.thumbnail?.trim() || undefined,
-      ownerId: params.ownerId?.trim() || undefined,
-      user: params.user?.trim() || undefined,
-      location: params.location?.trim() || undefined,
-    },
-    240000
-  );
+  const baseBody = {
+    query: params.query?.trim() || undefined,
+    videoId: params.videoId?.trim() || undefined,
+    title: params.title?.trim() || undefined,
+    artist: params.artist?.trim() || undefined,
+    duration: params.duration || undefined,
+    thumbnail: params.thumbnail?.trim() || undefined,
+    ownerId: params.ownerId?.trim() || undefined,
+    user: params.user?.trim() || undefined,
+    location: params.location?.trim() || undefined,
+  };
+
+  // Desktop Electron fast path:
+  // 1) Check Firebase cache first (~0.5s, zero YouTube download if already saved)
+  // 2) If uncached, download directly via residential-IP local yt-dlp (zero datacenter bot walls!) and upload to Firebase
+  // 3) If local yt-dlp isn't installed, fall through seamlessly to Cloud Run /api/fetch-song
+  const localFetcher =
+    typeof window !== 'undefined' ? window.electronAPI?.fetchLocalExternalSong : undefined;
+
+  if (localFetcher) {
+    let resolvedCandidate: FetchExternalSongResponse['candidate'] = null;
+    try {
+      const cacheRes = await postPlayServerJson<FetchExternalSongResponse>(
+        '/api/fetch-song',
+        { ...baseBody, cacheOnly: true },
+        25000
+      );
+      if (cacheRes.success && cacheRes.cached && cacheRes.data?.audioUrl) {
+        return { song: toPlayableSong(cacheRes.data), cached: true };
+      }
+      resolvedCandidate = cacheRes.candidate || null;
+    } catch {
+      // Cache check is best-effort; continue to local residential download
+    }
+
+    const uploadBaseUrl = cachedWorkingBaseUrl || PROD_PLAY_SERVER_URL;
+    const localRes = await localFetcher({
+      query: baseBody.query,
+      videoId: baseBody.videoId || resolvedCandidate?.videoId,
+      title: baseBody.title || resolvedCandidate?.title,
+      artist: baseBody.artist || resolvedCandidate?.artist,
+      duration: baseBody.duration || resolvedCandidate?.duration,
+      thumbnail: baseBody.thumbnail || resolvedCandidate?.thumbnail,
+      ownerId: baseBody.ownerId,
+      user: baseBody.user,
+      location: baseBody.location,
+      uploadBaseUrl,
+    });
+
+    if (localRes?.success && localRes.data?.audioUrl) {
+      return { song: toPlayableSong(localRes.data), cached: Boolean(localRes.cached) };
+    }
+
+    // If local yt-dlp IS installed and returned a real error (not missing binary), still fall back to Cloud Run
+    // in case SoundCloud/proxy on the server succeeds!
+    if (!localRes?.unavailable && localRes?.error) {
+      console.warn('[fetchAndSaveExternalSong] Local Electron fetch failed, trying Cloud Run:', localRes.error);
+    }
+  }
+
+  const res = await postPlayServerJson<FetchExternalSongResponse>('/api/fetch-song', baseBody, 240000);
 
   if (!res.success || !res.data?.audioUrl) {
     throw new Error(res.error || 'Failed to fetch and save external song.');
   }
 
-  const d = res.data;
-  const song: Song = {
-    id: d.id,
-    title: d.title || 'Untitled Track',
-    artist: d.artist || 'Unknown Artist',
-    albumArt: d.albumArt || 'https://mrdocs.empiredigitals.org/playIcon.png',
-    url: d.url || d.audioUrl,
-    audioUrl: d.audioUrl || d.url,
-    duration: Number(d.duration) || 0,
-    ownerId: d.ownerId || '',
-    active: true,
-    currentBid: 0,
-    action: 'stop',
-    isPlaying: false,
-    isSuggested: false,
-  };
-
-  return { song, cached: Boolean(res.cached) };
+  return { song: toPlayableSong(res.data), cached: Boolean(res.cached) };
 }
 
 export interface TikTokStreamStatusPayload extends TikTokStatusEvent {
@@ -213,6 +268,7 @@ export interface ConnectTikTokStreamParams {
   onLike?: (like: TikTokLikeEvent) => void;
   onRoomStats?: (stats: TikTokRoomStatsEvent) => void;
   onSocial?: (social: TikTokSocialEvent) => void;
+  onMember?: (member: TikTokMemberEvent) => void;
 }
 
 export interface TikTokStreamOutcome {
@@ -352,6 +408,9 @@ export async function connectTikTokLiveStream(
       case 'social':
         params.onSocial?.(payload as TikTokSocialEvent);
         break;
+      case 'member':
+        params.onMember?.(payload as TikTokMemberEvent);
+        break;
       default:
         break;
     }
@@ -390,4 +449,171 @@ export async function connectTikTokLiveStream(
   }
 
   return { connectedOnce, endedNaturally, fatalError };
+}
+
+export type AIMCEventType =
+  | 'join'
+  | 'question'
+  | 'gift'
+  | 'follow'
+  | 'share'
+  | 'now_playing'
+  | 'hype'
+  | 'custom'
+  | 'song_queued'
+  | 'song_need_coins'
+  | 'ai_song_cooking'
+  | 'ai_song_ready';
+
+export type AIMCAccent = 'zim' | 'sa' | 'jamaican' | 'us_club' | 'uk_club';
+export type AIMCEnergy = 'hype' | 'radio' | 'chill';
+export type AIMCVoiceName = 'Fenrir' | 'Puck' | 'Charon' | 'Kore' | 'Aoede' | 'Zephyr';
+
+export interface RequestAIMCSpeakParams {
+  eventType: AIMCEventType;
+  djName?: string;
+  mcName?: string;
+  aboutLive?: string;
+  accent?: AIMCAccent;
+  voiceName?: AIMCVoiceName;
+  energy?: AIMCEnergy;
+  viewerName?: string;
+  viewerNames?: string[];
+  question?: string;
+  giftName?: string;
+  giftCount?: number;
+  giftCoins?: number;
+  currentTrack?: { title: string; artist: string } | null;
+  recentLines?: string[];
+  customText?: string;
+  includeAudio?: boolean;
+}
+
+export interface RequestAIMCSpeakResponse {
+  success: boolean;
+  text: string;
+  audioBase64?: string | null;
+  mimeType?: string;
+  voiceName?: string;
+  ttsFallbackReason?: string;
+  error?: string;
+}
+
+export async function requestAIMCSpeak(
+  params: RequestAIMCSpeakParams
+): Promise<RequestAIMCSpeakResponse> {
+  const res = await postPlayServerJson<RequestAIMCSpeakResponse>(
+    '/api/ai-mc/speak',
+    params as unknown as Record<string, unknown>,
+    45000
+  );
+  if (!res.success || !res.text) {
+    throw new Error(res.error || 'AI MC could not generate a line.');
+  }
+  return res;
+}
+
+export interface AIMCCommentFilterResult {
+  success: boolean;
+  shouldReply: boolean;
+  reason?: string;
+}
+
+export async function classifyAIMCCommentTarget(params: {
+  comment: string;
+  viewerName?: string;
+  djName?: string;
+  hostHandle?: string;
+  mcName?: string;
+  aboutLive?: string;
+  currentTrack?: { title: string; artist: string } | null;
+  recentMessages?: Array<{ sender: string; text: string }>;
+}): Promise<AIMCCommentFilterResult> {
+  return postPlayServerJson<AIMCCommentFilterResult>(
+    '/api/ai-mc/should-reply',
+    {
+      comment: params.comment.trim(),
+      viewerName: params.viewerName?.trim() || undefined,
+      djName: params.djName?.trim() || undefined,
+      hostHandle: params.hostHandle?.trim() || undefined,
+      mcName: params.mcName?.trim() || undefined,
+      aboutLive: params.aboutLive?.trim() || undefined,
+      currentTrack: params.currentTrack || null,
+      recentMessages: params.recentMessages || [],
+    },
+    6000
+  );
+}
+
+export interface AISongIntentResult {
+  success: boolean;
+  intent: 'play_song' | 'create_ai_song' | 'none';
+  query?: string;
+  songTitle?: string;
+  aiPrompt?: string;
+  style?: string;
+  error?: string;
+}
+
+export async function parseAISongRequestIntent(params: {
+  comment: string;
+  viewerName?: string;
+  djName?: string;
+  allowCustomAiSong?: boolean;
+}): Promise<AISongIntentResult> {
+  return postPlayServerJson<AISongIntentResult>(
+    '/api/ai-song-intent',
+    {
+      comment: params.comment.trim(),
+      viewerName: params.viewerName?.trim() || undefined,
+      djName: params.djName?.trim() || undefined,
+      allowCustomAiSong: params.allowCustomAiSong !== false,
+    },
+    12000
+  );
+}
+
+export async function generateAndSaveLiveAISong(params: {
+  prompt: string;
+  songTitle?: string;
+  artistName?: string;
+  requestedBy?: string;
+  ownerId?: string;
+  user?: string;
+  location?: string;
+}): Promise<Song> {
+  const res = await postPlayServerJson<FetchExternalSongResponse>(
+    '/api/generate-and-save-ai-song',
+    {
+      prompt: params.prompt.trim(),
+      songTitle: params.songTitle?.trim() || undefined,
+      artistName: params.artistName?.trim() || undefined,
+      requestedBy: params.requestedBy?.trim() || undefined,
+      ownerId: params.ownerId?.trim() || undefined,
+      user: params.user?.trim() || undefined,
+      location: params.location?.trim() || 'TikTok LIVE',
+    },
+    200000
+  );
+
+  if (!res.success || !res.data?.audioUrl) {
+    throw new Error(res.error || 'Failed to create custom AI song.');
+  }
+
+  const d = res.data;
+  return {
+    id: d.id,
+    title: d.title || params.songTitle || 'Custom AI Track',
+    artist: d.artist || params.artistName || 'PlayMyJam AI',
+    albumArt: d.albumArt || 'https://mrdocs.empiredigitals.org/playIcon.png',
+    url: d.url || d.audioUrl,
+    audioUrl: d.audioUrl || d.url,
+    duration: Number(d.duration) || 0,
+    ownerId: d.ownerId || '',
+    active: true,
+    currentBid: 0,
+    action: 'stop',
+    isPlaying: false,
+    isSuggested: false,
+  };
 }

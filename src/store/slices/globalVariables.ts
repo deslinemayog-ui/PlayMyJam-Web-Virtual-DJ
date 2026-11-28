@@ -2,6 +2,7 @@ import { PayloadAction, createSlice } from "@reduxjs/toolkit";
 
 export interface SecretsType {
   OPENAI_API: string;
+  GEMINI_API_KEY?: string;
   appleApproved:boolean;
   playFee:number;
   bidShare:number;

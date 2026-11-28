@@ -3,18 +3,28 @@ import type { Song } from '@/Types';
 import type {
   TikTokChatEvent,
   TikTokGiftEvent,
+  TikTokMemberEvent,
   TikTokRequestLog,
   TikTokRequestStatus,
+  TikTokSocialEvent,
   TikTokSongRequest,
+  TikTokSongRequestFeedbackEvent,
   TikTokStatusEvent,
   TikTokViewerCredit,
 } from '@/types/tiktok';
 import {
+  extractExplicitAISongPrompt,
   extractSongRequestQuery,
   findBestMatchingSong,
   getTikTokViewerKey,
+  looksLikeNaturalSongRequest,
 } from '@/lib/tiktokSongRequests';
-import { connectTikTokLiveStream, fetchAndSaveExternalSong } from '@/lib/playServerApi';
+import {
+  connectTikTokLiveStream,
+  fetchAndSaveExternalSong,
+  generateAndSaveLiveAISong,
+  parseAISongRequestIntent,
+} from '@/lib/playServerApi';
 
 const STORAGE_KEY = 'playmyjam_tiktok_live_v1';
 
@@ -25,6 +35,9 @@ interface SavedTikTokConfig {
   signApiKey: string;
   minRequestCoins: number;
   requestsEnabled: boolean;
+  naturalRequestsEnabled: boolean;
+  aiSongRequestsEnabled: boolean;
+  aiSongMinCoins: number;
   autoPlayRequests: boolean;
   requireApproval: boolean;
   externalSearchEnabled: boolean;
@@ -49,10 +62,16 @@ interface UseTikTokLiveParams {
   songs?: Song[];
   ownerId?: string;
   userFolder?: string;
+  djName?: string;
   deckState?: TikTokDeckPlaybackState;
   onAutoPlayRequest?: (song: Song) => 'A' | 'B' | void;
   onStopSong?: (songId: string) => void;
   onPlaySoundEffect?: (effect: TikTokGiftSfxType) => void;
+  onMemberJoin?: (member: TikTokMemberEvent) => void;
+  onViewerChat?: (chat: TikTokChatEvent, isSongRequest: boolean) => void;
+  onFinalGift?: (gift: TikTokGiftEvent) => void;
+  onSocialEvent?: (social: TikTokSocialEvent) => void;
+  onSongRequestFeedback?: (event: TikTokSongRequestFeedbackEvent) => void;
 }
 
 export interface TikTokRequestNotice {
@@ -76,12 +95,16 @@ function loadSavedConfig(): SavedTikTokConfig {
     if (raw) {
       const parsed = JSON.parse(raw);
       const minCoins = Number(parsed.minRequestCoins);
+      const aiMinCoins = Number(parsed.aiSongMinCoins);
       const bigThreshold = Number(parsed.bigGiftThreshold);
       return {
         username: parsed.username || '',
         signApiKey: parsed.signApiKey || '',
         minRequestCoins: Number.isFinite(minCoins) && minCoins >= 0 ? Math.floor(minCoins) : 1,
         requestsEnabled: parsed.requestsEnabled !== false,
+        naturalRequestsEnabled: parsed.naturalRequestsEnabled !== false,
+        aiSongRequestsEnabled: parsed.aiSongRequestsEnabled !== false,
+        aiSongMinCoins: Number.isFinite(aiMinCoins) && aiMinCoins >= 0 ? Math.floor(aiMinCoins) : 50,
         autoPlayRequests: parsed.autoPlayRequests !== false,
         requireApproval: parsed.requireApproval === true,
         externalSearchEnabled: parsed.externalSearchEnabled !== false,
@@ -99,6 +122,9 @@ function loadSavedConfig(): SavedTikTokConfig {
     signApiKey: '',
     minRequestCoins: 1,
     requestsEnabled: true,
+    naturalRequestsEnabled: true,
+    aiSongRequestsEnabled: true,
+    aiSongMinCoins: 50,
     autoPlayRequests: true,
     requireApproval: false,
     externalSearchEnabled: true,
@@ -139,10 +165,16 @@ export const useTikTokLive = ({
   songs = [],
   ownerId = '',
   userFolder = 'dj_guest',
+  djName = 'DJ',
   deckState,
   onAutoPlayRequest,
   onStopSong,
   onPlaySoundEffect,
+  onMemberJoin,
+  onViewerChat,
+  onFinalGift,
+  onSocialEvent,
+  onSongRequestFeedback,
 }: UseTikTokLiveParams = {}) => {
   const isElectron = typeof window !== 'undefined' && Boolean(window.electronAPI?.tiktok);
 
@@ -172,11 +204,17 @@ export const useTikTokLive = ({
   const songsRef = useRef<Song[]>(songs);
   const ownerIdRef = useRef<string>(ownerId);
   const userFolderRef = useRef<string>(userFolder);
+  const djNameRef = useRef<string>(djName);
   const configRef = useRef<SavedTikTokConfig>(config);
   const isMockModeRef = useRef<boolean>(isMockMode);
   const onAutoPlayRequestRef = useRef(onAutoPlayRequest);
   const onStopSongRef = useRef(onStopSong);
   const onPlaySoundEffectRef = useRef(onPlaySoundEffect);
+  const onMemberJoinRef = useRef(onMemberJoin);
+  const onViewerChatRef = useRef(onViewerChat);
+  const onFinalGiftRef = useRef(onFinalGift);
+  const onSocialEventRef = useRef(onSocialEvent);
+  const onSongRequestFeedbackRef = useRef(onSongRequestFeedback);
   const lastGiftSfxAtRef = useRef<number>(0);
   const pendingAutoPlayUntilRef = useRef<number>(0);
   const inFlightExternalQueriesRef = useRef<Set<string>>(new Set());
@@ -212,6 +250,10 @@ export const useTikTokLive = ({
   }, [userFolder]);
 
   useEffect(() => {
+    djNameRef.current = djName || 'DJ';
+  }, [djName]);
+
+  useEffect(() => {
     configRef.current = config;
   }, [config]);
 
@@ -230,6 +272,26 @@ export const useTikTokLive = ({
   useEffect(() => {
     onPlaySoundEffectRef.current = onPlaySoundEffect;
   }, [onPlaySoundEffect]);
+
+  useEffect(() => {
+    onMemberJoinRef.current = onMemberJoin;
+  }, [onMemberJoin]);
+
+  useEffect(() => {
+    onViewerChatRef.current = onViewerChat;
+  }, [onViewerChat]);
+
+  useEffect(() => {
+    onFinalGiftRef.current = onFinalGift;
+  }, [onFinalGift]);
+
+  useEffect(() => {
+    onSocialEventRef.current = onSocialEvent;
+  }, [onSocialEvent]);
+
+  useEffect(() => {
+    onSongRequestFeedbackRef.current = onSongRequestFeedback;
+  }, [onSongRequestFeedback]);
 
   useEffect(() => {
     if (deckState) {
@@ -262,6 +324,10 @@ export const useTikTokLive = ({
       if (patch.minRequestCoins !== undefined) {
         const parsed = Math.floor(Number(patch.minRequestCoins));
         next.minRequestCoins = Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+      }
+      if (patch.aiSongMinCoins !== undefined) {
+        const parsed = Math.floor(Number(patch.aiSongMinCoins));
+        next.aiSongMinCoins = Number.isFinite(parsed) && parsed >= 0 ? parsed : 50;
       }
       if (patch.bigGiftThreshold !== undefined) {
         const parsed = Math.floor(Number(patch.bigGiftThreshold));
@@ -303,8 +369,8 @@ export const useTikTokLive = ({
   useEffect(() => {
     if (!hasDeckState) return;
 
-    const deckAEnded = !deckAPlaying && deckADuration > 0 && deckAPosition >= deckADuration - 1.2;
-    const deckBEnded = !deckBPlaying && deckBDuration > 0 && deckBPosition >= deckBDuration - 1.2;
+    const deckAEnded = !deckAPlaying && deckADuration > 0 && deckAPosition >= deckADuration - 1.5;
+    const deckBEnded = !deckBPlaying && deckBDuration > 0 && deckBPosition >= deckBDuration - 1.5;
 
     setSongRequests((prev) => {
       let changed = false;
@@ -322,9 +388,17 @@ export const useTikTokLive = ({
           nextDeck = onA && deckAPlaying ? 'A' : 'B';
         } else if (onA || onB) {
           const ended = (onA && deckAEnded) || (onB && deckBEnded);
-          if (req.status === 'playing' && ended) {
-            nextStatus = 'played';
-            nextDeck = undefined;
+          const otherDeckPlaying = (onA && deckBPlaying) || (onB && deckAPlaying);
+          if (req.status === 'playing') {
+            // Once a requested song has started playing, NEVER regress it back to 'loaded' or 'queued'
+            // (otherwise pausing during Auto DJ crossfade puts it back on top and loops requested songs!).
+            if (ended || otherDeckPlaying) {
+              nextStatus = 'played';
+              nextDeck = undefined;
+            } else {
+              nextStatus = 'playing';
+              nextDeck = onA ? 'A' : 'B';
+            }
           } else {
             nextStatus = 'loaded';
             nextDeck = onA ? 'A' : 'B';
@@ -371,13 +445,17 @@ export const useTikTokLive = ({
       userKey: string,
       query: string,
       matchedSong: Song,
-      source: 'library' | 'external'
+      source: 'library' | 'external' | 'ai',
+      overrideMinCoins?: number
     ) => {
       const currentCfg = configRef.current;
-      const minCoins = Math.max(
-        0,
-        Number.isFinite(currentCfg.minRequestCoins) ? currentCfg.minRequestCoins : 0
-      );
+      const minCoins =
+        overrideMinCoins !== undefined
+          ? Math.max(0, overrideMinCoins)
+          : Math.max(
+              0,
+              Number.isFinite(currentCfg.minRequestCoins) ? currentCfg.minRequestCoins : 0
+            );
       const credit = viewerCreditsRef.current.get(userKey);
       const availableCoins = credit?.availableCoins ?? 0;
 
@@ -394,6 +472,15 @@ export const useTikTokLive = ({
           'warning',
           `@${chat.uniqueId} asked for "${query}" — needs ${minCoins} coins (has ${availableCoins})`
         );
+        onSongRequestFeedbackRef.current?.({
+          kind: 'insufficient_coins',
+          viewerName: chat.nickname || chat.uniqueId,
+          query,
+          songTitle: `${matchedSong.artist} - ${matchedSong.title}`,
+          availableCoins,
+          requiredCoins: minCoins,
+          isCustomAISong: source === 'ai',
+        });
         return;
       }
 
@@ -492,7 +579,7 @@ export const useTikTokLive = ({
           id: `ttreq-${matchedSong.id}-${Date.now()}`,
           song: matchedSong,
           coins: spentCoins,
-          status: needsApproval ? 'pending' : triggeredAutoPlayDeck ? 'loaded' : 'queued',
+          status: needsApproval ? 'pending' : triggeredAutoPlayDeck ? 'playing' : 'queued',
           assignedDeck: triggeredAutoPlayDeck,
           source,
           requestedBy: {
@@ -519,7 +606,12 @@ export const useTikTokLive = ({
       setSongRequests(nextRequests);
 
       const songLabel = `${matchedSong.artist} - ${matchedSong.title}`;
-      const sourceNote = source === 'external' ? ' (saved to Firebase)' : '';
+      const sourceNote =
+        source === 'ai'
+          ? ' (Custom AI Song)'
+          : source === 'external'
+            ? ' (saved to Firebase)'
+            : '';
       appendRequestLog({
         type: needsApproval
           ? 'pending'
@@ -552,6 +644,16 @@ export const useTikTokLive = ({
           `Queued: ${songLabel} (${spentCoins > 0 ? `${spentCoins} coins` : 'Free'})${sourceNote}`
         );
       }
+
+      onSongRequestFeedbackRef.current?.({
+        kind: source === 'ai' ? 'ai_song_ready' : triggeredAutoPlayDeck ? 'playing' : 'queued',
+        viewerName: chat.nickname || chat.uniqueId,
+        query,
+        songTitle: source === 'ai' ? matchedSong.title : songLabel,
+        availableCoins: spentCoins,
+        requiredCoins: minCoins,
+        isCustomAISong: source === 'ai',
+      });
     },
     [appendRequestLog, showNotice, syncCreditsState]
   );
@@ -592,6 +694,8 @@ export const useTikTokLive = ({
             });
             syncCreditsState();
           }
+
+          onFinalGiftRef.current?.(gift);
         }
 
         // Play DJ sound effect reaction on gift (with 2.5s cooldown to avoid clipping on rapid combos)
@@ -610,16 +714,9 @@ export const useTikTokLive = ({
     [syncCreditsState]
   );
 
-  const handleIncomingChat = useCallback(
-    (chat: TikTokChatEvent) => {
-      setChatMessages((prev) => [chat, ...prev].slice(0, 100));
-
+  const processPlaySongRequest = useCallback(
+    (chat: TikTokChatEvent, query: string) => {
       const currentCfg = configRef.current;
-      if (!currentCfg.requestsEnabled) return;
-
-      const query = extractSongRequestQuery(chat.comment);
-      if (!query) return;
-
       const userKey = getTikTokViewerKey(chat.userId, chat.uniqueId);
       if (!userKey) return;
 
@@ -643,6 +740,14 @@ export const useTikTokLive = ({
           'warning',
           `@${chat.uniqueId} asked for "${query}" — needs ${minCoins} coins (has ${availableCoins})`
         );
+        onSongRequestFeedbackRef.current?.({
+          kind: 'insufficient_coins',
+          viewerName: chat.nickname || chat.uniqueId,
+          query,
+          availableCoins,
+          requiredCoins: minCoins,
+          isCustomAISong: false,
+        });
         return;
       }
 
@@ -735,6 +840,175 @@ export const useTikTokLive = ({
     [appendRequestLog, commitMatchedSong, showNotice]
   );
 
+  const processCustomAISongRequest = useCallback(
+    (chat: TikTokChatEvent, aiPrompt: string, songTitle?: string) => {
+      const currentCfg = configRef.current;
+      if (!currentCfg.aiSongRequestsEnabled) return;
+
+      const userKey = getTikTokViewerKey(chat.userId, chat.uniqueId);
+      if (!userKey) return;
+
+      const credit = viewerCreditsRef.current.get(userKey);
+      const availableCoins = credit?.availableCoins ?? 0;
+      const requiredCoins = Math.max(
+        0,
+        Number.isFinite(currentCfg.aiSongMinCoins) ? currentCfg.aiSongMinCoins : 50
+      );
+      const displayTitle = (songTitle || aiPrompt.slice(0, 42)).trim();
+
+      if (availableCoins < requiredCoins) {
+        appendRequestLog({
+          type: 'insufficient_coins',
+          nickname: chat.nickname,
+          uniqueId: chat.uniqueId,
+          query: `AI Song: ${displayTitle}`,
+          coins: availableCoins,
+          minCoins: requiredCoins,
+        });
+        showNotice(
+          'warning',
+          `@${chat.uniqueId} wants a custom AI song ("${displayTitle}") — needs ${requiredCoins} VIP coins (has ${availableCoins})`
+        );
+        onSongRequestFeedbackRef.current?.({
+          kind: 'insufficient_coins',
+          viewerName: chat.nickname || chat.uniqueId,
+          query: displayTitle,
+          songTitle: `custom AI song "${displayTitle}"`,
+          availableCoins,
+          requiredCoins,
+          isCustomAISong: true,
+        });
+        return;
+      }
+
+      const normKey = `ai:${aiPrompt.toLowerCase().trim()}`;
+      if (inFlightExternalQueriesRef.current.has(normKey)) {
+        showNotice('info', `Already cooking custom AI song "${displayTitle}"...`);
+        return;
+      }
+
+      inFlightExternalQueriesRef.current.add(normKey);
+      const searchingLabel = `✨ AI Song: ${displayTitle}`;
+      setSearchingQueries((prev) => (prev.includes(searchingLabel) ? prev : [...prev, searchingLabel]));
+
+      appendRequestLog({
+        type: 'ai_generating',
+        nickname: chat.nickname,
+        uniqueId: chat.uniqueId,
+        query: displayTitle,
+        coins: availableCoins,
+        minCoins: requiredCoins,
+      });
+      showNotice('info', `✨ Creating custom AI song for @${chat.uniqueId}: "${displayTitle}"...`);
+
+      onSongRequestFeedbackRef.current?.({
+        kind: 'ai_song_cooking',
+        viewerName: chat.nickname || chat.uniqueId,
+        query: aiPrompt,
+        songTitle: displayTitle,
+        availableCoins,
+        requiredCoins,
+        isCustomAISong: true,
+      });
+
+      void (async () => {
+        try {
+          const createdSong = await generateAndSaveLiveAISong({
+            prompt: aiPrompt,
+            songTitle: displayTitle,
+            artistName: djNameRef.current || 'PlayMyJam AI',
+            requestedBy: chat.nickname || chat.uniqueId,
+            ownerId: ownerIdRef.current,
+            user: userFolderRef.current,
+            location: 'TikTok LIVE',
+          });
+          commitMatchedSong(chat, userKey, displayTitle, createdSong, 'ai', requiredCoins);
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : 'Custom AI song creation failed';
+          appendRequestLog({
+            type: 'external_error',
+            nickname: chat.nickname,
+            uniqueId: chat.uniqueId,
+            query: `AI Song: ${displayTitle}`,
+            error: errMsg,
+            coins: availableCoins,
+            minCoins: requiredCoins,
+          });
+          showNotice('warning', `Could not create custom AI song "${displayTitle}": ${errMsg}`);
+        } finally {
+          inFlightExternalQueriesRef.current.delete(normKey);
+          setSearchingQueries((prev) => prev.filter((q) => q !== searchingLabel));
+        }
+      })();
+    },
+    [appendRequestLog, commitMatchedSong, showNotice]
+  );
+
+  const handleIncomingChat = useCallback(
+    (chat: TikTokChatEvent) => {
+      setChatMessages((prev) => [chat, ...prev].slice(0, 100));
+
+      const currentCfg = configRef.current;
+
+      // 1. Explicit slash commands (0ms, zero LLM cost)
+      if (currentCfg.requestsEnabled) {
+        const explicitQuery = extractSongRequestQuery(chat.comment);
+        if (explicitQuery) {
+          onViewerChatRef.current?.(chat, true);
+          processPlaySongRequest(chat, explicitQuery);
+          return;
+        }
+
+        if (currentCfg.aiSongRequestsEnabled) {
+          const explicitAiPrompt = extractExplicitAISongPrompt(chat.comment);
+          if (explicitAiPrompt) {
+            onViewerChatRef.current?.(chat, true);
+            processCustomAISongRequest(chat, explicitAiPrompt);
+            return;
+          }
+        }
+
+        // 2. Natural-language AI song request detection (English & Shona, gated by fast local pre-filter)
+        if (
+          (currentCfg.naturalRequestsEnabled || currentCfg.aiSongRequestsEnabled) &&
+          looksLikeNaturalSongRequest(chat.comment)
+        ) {
+          void (async () => {
+            try {
+              const intentRes = await parseAISongRequestIntent({
+                comment: chat.comment,
+                viewerName: chat.nickname || chat.uniqueId,
+                djName: djNameRef.current,
+                allowCustomAiSong: currentCfg.aiSongRequestsEnabled,
+              });
+
+              if (intentRes.intent === 'play_song' && intentRes.query && currentCfg.naturalRequestsEnabled) {
+                onViewerChatRef.current?.(chat, true);
+                processPlaySongRequest(chat, intentRes.query);
+                return;
+              }
+
+              if (intentRes.intent === 'create_ai_song' && intentRes.aiPrompt && currentCfg.aiSongRequestsEnabled) {
+                onViewerChatRef.current?.(chat, true);
+                processCustomAISongRequest(chat, intentRes.aiPrompt, intentRes.songTitle);
+                return;
+              }
+            } catch (err) {
+              console.warn('[TikTokLive] Natural AI song intent check failed:', err);
+            }
+            // Not a song request — let AI MC reply to it as normal live chat!
+            onViewerChatRef.current?.(chat, false);
+          })();
+          return;
+        }
+      }
+
+      // 3. Normal live chat comment (0ms, zero LLM cost)
+      onViewerChatRef.current?.(chat, false);
+    },
+    [processCustomAISongRequest, processPlaySongRequest]
+  );
+
   useEffect(() => {
     if (!window.electronAPI?.tiktok) return;
 
@@ -765,6 +1039,16 @@ export const useTikTokLive = ({
       window.electronAPI.tiktok.onRoomStats((stats) => {
         if (!isMockModeRef.current) {
           setViewerCount(stats.viewerCount);
+        }
+      }),
+      window.electronAPI.tiktok.onSocial((social) => {
+        if (!isMockModeRef.current) {
+          onSocialEventRef.current?.(social);
+        }
+      }),
+      window.electronAPI.tiktok.onMember?.((member) => {
+        if (!isMockModeRef.current) {
+          onMemberJoinRef.current?.(member);
         }
       }),
     ];
@@ -895,6 +1179,16 @@ export const useTikTokLive = ({
                   setViewerCount(stats.viewerCount);
                 }
               },
+              onSocial: (social) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  onSocialEventRef.current?.(social);
+                }
+              },
+              onMember: (member) => {
+                if (webSessionIdRef.current === sessionId && !isMockModeRef.current) {
+                  onMemberJoinRef.current?.(member);
+                }
+              },
             });
 
             if (webSessionIdRef.current !== sessionId || controller.signal.aborted) {
@@ -1019,6 +1313,29 @@ export const useTikTokLive = ({
     [handleIncomingGift]
   );
 
+  const creditViewerCoinsSilently = useCallback(
+    (params: { uniqueId: string; nickname?: string; coins: number }) => {
+      const cleanHandle = (params.uniqueId || 'testfan').trim().replace(/^@+/, '') || 'testfan';
+      const userId = `mock-user-${cleanHandle.toLowerCase()}`;
+      const userKey = getTikTokViewerKey(userId, cleanHandle);
+      const amount = Math.max(0, Math.floor(Number(params.coins) || 0));
+      if (!userKey || amount <= 0) return;
+
+      const existing = viewerCreditsRef.current.get(userKey);
+      viewerCreditsRef.current.set(userKey, {
+        userKey,
+        userId,
+        uniqueId: cleanHandle,
+        nickname: params.nickname || cleanHandle,
+        availableCoins: (existing?.availableCoins || 0) + amount,
+        totalGiftedCoins: (existing?.totalGiftedCoins || 0) + amount,
+        lastGiftedAt: Date.now(),
+      });
+      syncCreditsState();
+    },
+    [syncCreditsState]
+  );
+
   const simulateChat = useCallback(
     (params: { uniqueId: string; nickname?: string; comment: string }) => {
       const cleanComment = (params.comment || '').trim();
@@ -1048,7 +1365,7 @@ export const useTikTokLive = ({
     setStatus({ state: 'disconnected', uniqueId: '' });
   }, [stopWebRelay]);
 
-  // Mark a song request as playing/loaded rather than deleting it immediately from the UI
+  // Mark a song request as playing right away so it drops off the top of the request queue immediately
   const consumeSongRequest = useCallback((songId: string, deck?: 'A' | 'B') => {
     if (!songId) return;
     setSongRequests((prev) => {
@@ -1060,6 +1377,29 @@ export const useTikTokLive = ({
             ...r,
             status: 'playing' as TikTokRequestStatus,
             assignedDeck: deck ?? r.assignedDeck,
+          };
+        }
+        return r;
+      });
+      if (!changed) return prev;
+      const sorted = sortSongRequests(updated);
+      songRequestsRef.current = sorted;
+      return sorted;
+    });
+  }, []);
+
+  // Explicitly mark a song request as played (e.g. when Auto DJ crossfades away from it or skips it)
+  const markSongRequestPlayed = useCallback((songId: string) => {
+    if (!songId) return;
+    setSongRequests((prev) => {
+      let changed = false;
+      const updated = prev.map((r) => {
+        if (r.song.id === songId && (r.status === 'playing' || isActiveRequest(r))) {
+          changed = true;
+          return {
+            ...r,
+            status: 'played' as TikTokRequestStatus,
+            assignedDeck: undefined,
           };
         }
         return r;
@@ -1114,7 +1454,7 @@ export const useTikTokLive = ({
           r.id === requestId
             ? {
                 ...r,
-                status: (triggeredDeck ? 'loaded' : 'queued') as TikTokRequestStatus,
+                status: (triggeredDeck ? 'playing' : 'queued') as TikTokRequestStatus,
                 assignedDeck: triggeredDeck,
               }
             : r
@@ -1265,6 +1605,7 @@ export const useTikTokLive = ({
     connect,
     startMockLive,
     simulateGift,
+    creditViewerCoinsSilently,
     simulateChat,
     disconnect,
     gifts,
@@ -1282,6 +1623,7 @@ export const useTikTokLive = ({
     lastRequestNotice,
     tiktokRequestCoinsBySongId,
     consumeSongRequest,
+    markSongRequestPlayed,
     markSongRequestLoaded,
     approveSongRequest,
     rejectSongRequest,

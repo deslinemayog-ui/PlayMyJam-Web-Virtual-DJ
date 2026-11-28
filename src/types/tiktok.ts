@@ -46,6 +46,15 @@ export interface TikTokSocialEvent {
   timestamp: number;
 }
 
+export interface TikTokMemberEvent {
+  id: string;
+  userId: string;
+  uniqueId: string;
+  nickname: string;
+  profilePictureUrl: string;
+  timestamp: number;
+}
+
 export interface TikTokRoomStatsEvent {
   viewerCount: number;
   timestamp: number;
@@ -79,7 +88,7 @@ export interface TikTokSongRequest {
   coins: number;
   status: TikTokRequestStatus;
   assignedDeck?: 'A' | 'B';
-  source?: 'library' | 'external';
+  source?: 'library' | 'external' | 'ai';
   requestedBy: {
     userKey: string;
     userId: string;
@@ -109,6 +118,7 @@ export interface TikTokRequestLog {
     | 'insufficient_coins'
     | 'not_found'
     | 'searching'
+    | 'ai_generating'
     | 'external_error';
   nickname: string;
   uniqueId: string;
@@ -119,4 +129,14 @@ export interface TikTokRequestLog {
   coins: number;
   minCoins: number;
   timestamp: number;
+}
+
+export interface TikTokSongRequestFeedbackEvent {
+  kind: 'queued' | 'playing' | 'insufficient_coins' | 'ai_song_cooking' | 'ai_song_ready';
+  viewerName: string;
+  query: string;
+  songTitle?: string;
+  availableCoins?: number;
+  requiredCoins?: number;
+  isCustomAISong?: boolean;
 }

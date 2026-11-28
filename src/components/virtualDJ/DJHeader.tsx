@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowLeft, User, Wallet, LogOut, Sparkles, Shuffle, ChevronDown, Hand, Radio, Disc3 } from 'lucide-react';
+import { ArrowLeft, User, Wallet, LogOut, Shuffle, ChevronDown, Radio, Disc3, Mic } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { currencyFormatter } from '@/utils';
 import { Button } from '@/components/ui/button';
-import AutoDJPanel from './AutoDJPanel';
 import playLogo from '/play.webp';
 
 interface DJHeaderProps {
@@ -16,55 +15,41 @@ interface DJHeaderProps {
   isTikTokConnected?: boolean;
   tiktokViewerCount?: number;
   onOpenTikTokModal?: () => void;
+  // AI MC props
+  isAIMCEnabled?: boolean;
+  isAIMCSpeaking?: boolean;
+  onOpenAIMCModal?: () => void;
   // Pioneer / MIDI Hardware props
   isHardwareConnected?: boolean;
   hardwareDeviceName?: string;
   onOpenHardwareModal?: () => void;
-  // Auto DJ props
-  autoDJState?: any;
-  currentSong?: any;
-  nextSong?: any;
-  timeRemaining?: number;
-  startAutoDJ?: () => void;
-  stopAutoDJ?: () => void;
-  skipToNext?: () => void;
-  updateTransitionDuration?: (seconds: number) => void;
-  updateCrossfadeSpeed?: (seconds: number) => void;
+  // Auto DJ modal props
+  isAutoDJEnabled?: boolean;
+  isAutoDJTransitioning?: boolean;
+  onOpenAutoDJModal?: () => void;
 }
 
 const DJHeader: React.FC<DJHeaderProps> = ({
-  discoLightsEnabled = true,
-  onToggleDiscoLights,
-  airDJEnabled = false,
-  onToggleAirDJ,
   isTikTokConnected = false,
   tiktokViewerCount = 0,
   onOpenTikTokModal,
+  isAIMCEnabled = false,
+  isAIMCSpeaking = false,
+  onOpenAIMCModal,
   isHardwareConnected = false,
   hardwareDeviceName = '',
   onOpenHardwareModal,
-  autoDJState,
-  currentSong,
-  nextSong,
-  timeRemaining,
-  startAutoDJ,
-  stopAutoDJ,
-  skipToNext,
-  updateTransitionDuration,
-  updateCrossfadeSpeed
+  isAutoDJEnabled = false,
+  isAutoDJTransitioning = false,
+  onOpenAutoDJModal,
 }) => {
   const { user, isAuthenticated, logout } = useAuth();
-  const [showAutoDJPanel, setShowAutoDJPanel] = useState(false);
   const [showProfileMenu, setShowProfileMenu] = useState(false);
-  const autoDJDropdownRef = useRef<HTMLDivElement>(null);
   const profileDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Close dropdowns when clicking outside or pressing Escape
+  // Close profile menu when clicking outside or pressing Escape
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (autoDJDropdownRef.current && !autoDJDropdownRef.current.contains(event.target as Node)) {
-        setShowAutoDJPanel(false);
-      }
       if (profileDropdownRef.current && !profileDropdownRef.current.contains(event.target as Node)) {
         setShowProfileMenu(false);
       }
@@ -72,7 +57,6 @@ const DJHeader: React.FC<DJHeaderProps> = ({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setShowAutoDJPanel(false);
         setShowProfileMenu(false);
       }
     };
@@ -105,41 +89,22 @@ const DJHeader: React.FC<DJHeaderProps> = ({
         {/* DJ Info Section */}
         {isAuthenticated && user ? (
           <div className="flex items-center gap-4 relative">
-            {/* Auto DJ Dropdown */}
-            <div className="relative" ref={autoDJDropdownRef}>
-              <Button
-                onClick={() => setShowAutoDJPanel(!showAutoDJPanel)}
-                variant="outline"
-                size="sm"
-                className={`${autoDJState?.isEnabled
-                  ? 'border-green-500 text-green-400 bg-green-500/20'
-                  : 'border-blue-500 text-blue-400 bg-blue-500/20'
-                  } hover:bg-blue-500 hover:text-white font-montserrat-bold transition-colors`}
-              >
-                <Shuffle className="w-4 h-4 mr-1" />
-                Auto DJ
-                <ChevronDown className={`w-3 h-3 ml-1 transition-transform ${showAutoDJPanel ? 'rotate-180' : ''}`} />
-              </Button>
-
-              {/* Auto DJ Panel Dropdown */}
-              {showAutoDJPanel && (
-                <div className="absolute top-full right-0 mt-2 z-50">
-                  <div className="bg-gray-900/95 backdrop-blur-sm border border-gray-600/50 rounded-lg shadow-2xl">
-                    <AutoDJPanel
-                      autoDJState={autoDJState}
-                      currentSong={currentSong}
-                      nextSong={nextSong}
-                      timeRemaining={timeRemaining || 0}
-                      startAutoDJ={startAutoDJ || (() => { })}
-                      stopAutoDJ={stopAutoDJ || (() => { })}
-                      skipToNext={skipToNext || (() => { })}
-                      updateTransitionDuration={updateTransitionDuration || (() => { })}
-                      updateCrossfadeSpeed={updateCrossfadeSpeed || (() => { })}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
+            {/* Auto DJ Modal Button */}
+            <Button
+              onClick={onOpenAutoDJModal}
+              variant="outline"
+              size="sm"
+              className={`${isAutoDJTransitioning
+                ? 'border-cyan-400 text-cyan-200 bg-cyan-500/25 shadow-[0_0_12px_rgba(34,211,238,0.35)] animate-pulse'
+                : isAutoDJEnabled
+                  ? 'border-emerald-400 text-emerald-300 bg-emerald-500/20 hover:bg-emerald-500/30'
+                  : 'border-blue-500 text-blue-300 bg-blue-500/15 hover:bg-blue-500 hover:text-white'
+                } font-montserrat-bold transition-all`}
+              title="Open Auto DJ settings and live transition status"
+            >
+              <Shuffle className="w-4 h-4 mr-1.5" />
+              {isAutoDJTransitioning ? 'Auto DJ • Mixing' : isAutoDJEnabled ? 'Auto DJ • On' : 'Auto DJ'}
+            </Button>
 
             {/* Connect TikTok Button */}
             <Button
@@ -158,6 +123,23 @@ const DJHeader: React.FC<DJHeaderProps> = ({
                   {tiktokViewerCount.toLocaleString()}
                 </span>
               )}
+            </Button>
+
+            {/* AI MC Live Host Button */}
+            <Button
+              onClick={onOpenAIMCModal}
+              variant="outline"
+              size="sm"
+              className={`${isAIMCSpeaking
+                ? 'border-amber-400 text-amber-200 bg-amber-500/25 shadow-[0_0_12px_rgba(251,191,36,0.35)] animate-pulse'
+                : isAIMCEnabled
+                  ? 'border-amber-400/80 text-amber-300 bg-amber-500/15 hover:bg-amber-500/25'
+                  : 'border-amber-500/50 text-amber-200/90 bg-amber-500/10 hover:bg-amber-500 hover:text-black'
+                } font-montserrat-bold transition-all`}
+              title="Open AI MC Studio (Live Zimbabwean Hype Host & Gemini Voice)"
+            >
+              <Mic className="w-4 h-4 mr-1.5" />
+              {isAIMCSpeaking ? 'AI MC • Live' : isAIMCEnabled ? 'AI MC • On' : 'AI MC'}
             </Button>
 
             {/* Pioneer / MIDI Hardware Button */}
@@ -283,6 +265,18 @@ const DJHeader: React.FC<DJHeaderProps> = ({
         ) : (
           <div className="flex items-center gap-3">
             <Button
+              onClick={onOpenAutoDJModal}
+              variant="outline"
+              size="sm"
+              className={`${isAutoDJEnabled
+                ? 'border-emerald-400 text-emerald-300 bg-emerald-500/20 hover:bg-emerald-500/30'
+                : 'border-blue-500 text-blue-300 bg-blue-500/15 hover:bg-blue-500 hover:text-white'
+                } font-montserrat-bold transition-all`}
+            >
+              <Shuffle className="w-4 h-4 mr-1.5" />
+              {isAutoDJEnabled ? 'Auto DJ • On' : 'Auto DJ'}
+            </Button>
+            <Button
               onClick={onOpenTikTokModal}
               variant="outline"
               size="sm"
@@ -293,6 +287,20 @@ const DJHeader: React.FC<DJHeaderProps> = ({
             >
               <Radio className={`w-4 h-4 mr-1.5 ${isTikTokConnected ? 'animate-pulse' : ''}`} />
               {isTikTokConnected ? 'TikTok Live' : 'Connect TikTok'}
+            </Button>
+            <Button
+              onClick={onOpenAIMCModal}
+              variant="outline"
+              size="sm"
+              className={`${isAIMCSpeaking
+                ? 'border-amber-400 text-amber-200 bg-amber-500/25 animate-pulse'
+                : isAIMCEnabled
+                  ? 'border-amber-400/80 text-amber-300 bg-amber-500/15 hover:bg-amber-500/25'
+                  : 'border-amber-500/50 text-amber-200/90 bg-amber-500/10 hover:bg-amber-500 hover:text-black'
+                } font-montserrat-bold transition-all`}
+            >
+              <Mic className="w-4 h-4 mr-1.5" />
+              {isAIMCSpeaking ? 'AI MC • Live' : isAIMCEnabled ? 'AI MC • On' : 'AI MC'}
             </Button>
             <Button
               onClick={onOpenHardwareModal}

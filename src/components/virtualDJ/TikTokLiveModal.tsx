@@ -635,6 +635,49 @@ const TikTokLiveModal: React.FC<TikTokLiveModalProps> = ({
 
                 <div className="h-4 w-px bg-white/15" />
 
+                <label
+                  className="flex items-center gap-2 text-white font-semibold cursor-pointer"
+                  title="AI understands natural English & Shona song requests without needing /play"
+                >
+                  <Switch
+                    checked={live.config.naturalRequestsEnabled}
+                    onCheckedChange={(v) => live.updateConfig({ naturalRequestsEnabled: v })}
+                  />
+                  <span>AI Requests</span>
+                </label>
+
+                <div className="h-4 w-px bg-white/15" />
+
+                <label
+                  className="flex items-center gap-2 text-white font-semibold cursor-pointer"
+                  title="Allow VIP viewers to request brand-new custom AI songs created live with Lyria 3"
+                >
+                  <Switch
+                    checked={live.config.aiSongRequestsEnabled}
+                    onCheckedChange={(v) => live.updateConfig({ aiSongRequestsEnabled: v })}
+                  />
+                  <span className="text-fuchsia-300">VIP AI Songs</span>
+                </label>
+
+                {live.config.aiSongRequestsEnabled && (
+                  <label className="flex items-center gap-1 text-fuchsia-200">
+                    <span>VIP Coins:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={5}
+                      value={live.config.aiSongMinCoins}
+                      onChange={(e) => {
+                        const val = Math.max(0, Math.floor(Number(e.target.value) || 0));
+                        live.updateConfig({ aiSongMinCoins: val });
+                      }}
+                      className="w-14 px-1.5 py-1 rounded bg-black/50 border border-fuchsia-400/35 text-white text-xs font-montserrat-bold text-center focus:outline-none focus:border-fuchsia-400"
+                    />
+                  </label>
+                )}
+
+                <div className="h-4 w-px bg-white/15" />
+
                 <label className="flex items-center gap-1.5 text-gray-300">
                   <Coins className="w-3.5 h-3.5 text-yellow-400" />
                   <span>Min Coins:</span>
@@ -867,6 +910,11 @@ const TikTokLiveModal: React.FC<TikTokLiveModalProps> = ({
                               {req.source === 'external' && (
                                 <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 text-[9px] font-semibold uppercase flex-shrink-0">
                                   Firebase
+                                </span>
+                              )}
+                              {req.source === 'ai' && (
+                                <span className="px-1.5 py-0.2 rounded bg-fuchsia-500/25 border border-fuchsia-400/50 text-fuchsia-200 text-[9px] font-bold uppercase flex-shrink-0">
+                                  VIP AI Song
                                 </span>
                               )}
                             </div>

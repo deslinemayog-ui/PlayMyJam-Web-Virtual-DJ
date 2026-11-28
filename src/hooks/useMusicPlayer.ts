@@ -134,6 +134,8 @@ export const useMusicPlayer = () => {
   const deckBVolumeRef = useRef<number>(toSafeNumber(musicPlayerState?.deckB?.volume, 75));
   const crossfaderRef = useRef<number>(toSafeNumber(musicPlayerState?.crossfader, 50));
   const masterVolumeRef = useRef<number>(toSafeNumber(musicPlayerState?.masterVolume, 75));
+  const talkoverDuckMultiplierRef = useRef<number>(1);
+  const talkoverRampSecRef = useRef<number>(0.015);
   const deckAEQRef = useRef({
     high: toSafeNumber(musicPlayerState?.deckAEQ?.high, 50),
     mid: toSafeNumber(musicPlayerState?.deckAEQ?.mid, 50),
@@ -148,10 +150,20 @@ export const useMusicPlayer = () => {
   // Audio element refs for both decks
   const deckAAudioRef = useRef<HTMLAudioElement | null>(null);
   const deckBAudioRef = useRef<HTMLAudioElement | null>(null);
+  const deckATrackRef = useRef<Song | null>(musicPlayerState?.deckA?.currentTrack ?? null);
+  const deckBTrackRef = useRef<Song | null>(musicPlayerState?.deckB?.currentTrack ?? null);
+  const deckAPlayingRef = useRef<boolean>(Boolean(musicPlayerState?.deckA?.isPlaying));
+  const deckBPlayingRef = useRef<boolean>(Boolean(musicPlayerState?.deckB?.isPlaying));
   const deckATimeUpdateRef = useRef<(() => void) | null>(null);
   const deckBTimeUpdateRef = useRef<(() => void) | null>(null);
   const deckALoadGenRef = useRef<number>(0);
   const deckBLoadGenRef = useRef<number>(0);
+
+  // Keep deck track/playing refs synchronously mirrored to Redux state to prevent stale closures
+  deckATrackRef.current = musicPlayerState?.deckA?.currentTrack ?? null;
+  deckBTrackRef.current = musicPlayerState?.deckB?.currentTrack ?? null;
+  deckAPlayingRef.current = Boolean(musicPlayerState?.deckA?.isPlaying);
+  deckBPlayingRef.current = Boolean(musicPlayerState?.deckB?.isPlaying);
 
   // Web Audio API refs for effects
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -436,7 +448,10 @@ export const useMusicPlayer = () => {
 
     const volA = toSafeNumber(deckAVolumeRef.current, 75) / 100;
     const volB = toSafeNumber(deckBVolumeRef.current, 75) / 100;
-    const master = toSafeNumber(masterVolumeRef.current, 75) / 100;
+    const masterBase = toSafeNumber(masterVolumeRef.current, 75) / 100;
+    const duckMult = Math.max(0.05, Math.min(1, talkoverDuckMultiplierRef.current));
+    const master = masterBase * duckMult;
+    const masterRamp = talkoverRampSecRef.current;
 
     const ctx = audioContextRef.current;
     const isCtxOpen = Boolean(ctx && ctx.state !== 'closed');
@@ -488,12 +503,25 @@ export const useMusicPlayer = () => {
       const targetMaster = Math.max(0, Math.min(1, master));
       masterGainRef.current.gain.cancelScheduledValues(now);
       if (ctx.state === 'running') {
-        masterGainRef.current.gain.setTargetAtTime(targetMaster, now, 0.015);
+        masterGainRef.current.gain.setTargetAtTime(targetMaster, now, masterRamp);
       } else {
         masterGainRef.current.gain.value = targetMaster;
       }
     }
   }, []);
+
+  // Smoothly dip/restore music volume while the AI MC talks (Talkover auto-ducking)
+  const setTalkoverDuck = useCallback(
+    (active: boolean, duckPercent = 32) => {
+      const clamped = Math.max(10, Math.min(85, Number(duckPercent) || 32)) / 100;
+      talkoverDuckMultiplierRef.current = active ? clamped : 1;
+      talkoverRampSecRef.current = active ? 0.1 : 0.22;
+      applyDeckGains();
+      // Reset ramp time back to snappy fader response for manual master knob drags
+      talkoverRampSecRef.current = 0.015;
+    },
+    [applyDeckGains]
+  );
 
   // Keep volume & crossfader refs synced when Redux rehydrates persisted values
   useEffect(() => {
@@ -658,24 +686,27 @@ export const useMusicPlayer = () => {
   const loadTrackToDeckA = useCallback(async (song: Song, autoPlay = false) => {
     if (!deckAAudioRef.current) return;
 
+    const audioUrl = song.audioUrl || song.url;
+    if (!audioUrl) {
+      console.error('No audio URL found for track:', song);
+      dispatch(setDeckALoading(false));
+      return;
+    }
+
     const loadGen = ++deckALoadGenRef.current;
     console.log('Loading track to Deck A:', song.title, autoPlay ? '(autoPlay)' : '');
+    deckATrackRef.current = song;
+    deckAPlayingRef.current = false;
     dispatch(setDeckALoading(true));
     dispatch(setDeckATrack(song));
 
     try {
-      // Set the audio source
-      const audioUrl = song.audioUrl || song.url;
+      // Stop any previous playback & clear loop flag cleanly before switching source
+      deckAAudioRef.current.pause();
+      deckAAudioRef.current.currentTime = 0;
+      deckAAudioRef.current.dataset.isLooping = 'false';
+
       console.log('Deck A audio URL:', audioUrl);
-
-      if (!audioUrl) {
-        console.error('No audio URL found for track:', song);
-        dispatch(setDeckALoading(false));
-        return;
-      }
-
-      // Use the original audio URL (no CORS needed for HTML5 audio)
-      console.log('Setting audio source for Deck A:', audioUrl);
       deckAAudioRef.current.src = audioUrl;
 
       // Initialize Web Audio immediately (CORS enabled)
@@ -787,7 +818,9 @@ export const useMusicPlayer = () => {
   }, [dispatch, initializeWebAudioForDeckA]);
 
   const playDeckA = useCallback(async () => {
-    if (!deckAAudioRef.current || !musicPlayerState.deckA.currentTrack) {
+    const audio = deckAAudioRef.current;
+    const track = deckATrackRef.current;
+    if (!audio || (!track && !audio.src)) {
       console.warn('❌ Cannot play Deck A - missing audio ref or track');
       return;
     }
@@ -796,55 +829,70 @@ export const useMusicPlayer = () => {
       if (audioContextRef.current?.state === 'suspended') {
         await audioContextRef.current.resume();
       }
-      if (!deckAAudioRef.current.paused) {
-        deckAAudioRef.current.pause();
+      applyDeckGains();
+
+      if (!audio.paused) {
+        deckAPlayingRef.current = true;
+        dispatch(setDeckAPlaying(true));
+        return;
       }
 
-      const playPromise = deckAAudioRef.current.play();
+      const playPromise = audio.play();
 
       if (playPromise !== undefined) {
         await playPromise;
+        deckAPlayingRef.current = true;
         dispatch(setDeckAPlaying(true));
-        console.log('▶️ Deck A playing:', musicPlayerState.deckA.currentTrack.title);
+        console.log('▶️ Deck A playing:', track?.title || audio.src);
       }
     } catch (error) {
       console.error('❌ Error playing Deck A:', error);
+      deckAPlayingRef.current = false;
       dispatch(setDeckAPlaying(false));
     }
-  }, [dispatch, musicPlayerState.deckA.currentTrack]);
+  }, [dispatch, applyDeckGains]);
 
   const pauseDeckA = useCallback(() => {
-    if (deckAAudioRef.current && musicPlayerState.deckA.currentTrack) {
-      deckAAudioRef.current.pause();
+    const audio = deckAAudioRef.current;
+    if (audio) {
+      audio.pause();
+      deckAPlayingRef.current = false;
       dispatch(setDeckAPlaying(false));
-      console.log('⏸️ Deck A paused:', musicPlayerState.deckA.currentTrack.title);
+      if (deckATrackRef.current) {
+        console.log('⏸️ Deck A paused:', deckATrackRef.current.title);
+      }
     }
-  }, [dispatch, musicPlayerState.deckA.currentTrack]);
+  }, [dispatch]);
 
   const stopDeckA = useCallback(() => {
-    if (deckAAudioRef.current && musicPlayerState.deckA.currentTrack) {
-      deckAAudioRef.current.pause();
-      deckAAudioRef.current.currentTime = 0;
+    const audio = deckAAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      deckAPlayingRef.current = false;
       dispatch(setDeckAPlaying(false));
       dispatch(setDeckAPosition(0));
-      console.log('⏹️ Deck A stopped:', musicPlayerState.deckA.currentTrack.title);
+      if (deckATrackRef.current) {
+        console.log('⏹️ Deck A stopped:', deckATrackRef.current.title);
+      }
     }
-  }, [dispatch, musicPlayerState.deckA.currentTrack]);
+  }, [dispatch]);
 
   const toggleDeckA = useCallback(() => {
     // Check if audio element exists and is in sync with state
-    if (!deckAAudioRef.current && musicPlayerState.deckA.currentTrack) {
+    if (!deckAAudioRef.current && deckATrackRef.current) {
       console.warn('❌ Audio element for Deck A not found but track exists - resetting state');
+      deckAPlayingRef.current = false;
       dispatch(setDeckAPlaying(false));
       return;
     }
 
-    if (musicPlayerState.deckA.isPlaying) {
+    if (deckAPlayingRef.current || (deckAAudioRef.current && !deckAAudioRef.current.paused)) {
       pauseDeckA();
     } else {
-      playDeckA();
+      void playDeckA();
     }
-  }, [musicPlayerState.deckA.isPlaying, musicPlayerState.deckA.currentTrack, playDeckA, pauseDeckA, dispatch]);
+  }, [playDeckA, pauseDeckA, dispatch]);
 
   // Initialize Web Audio nodes for Deck B (CORS enabled)
   const initializeWebAudioForDeckB = useCallback(() => {
@@ -987,22 +1035,27 @@ export const useMusicPlayer = () => {
   const loadTrackToDeckB = useCallback(async (song: Song, autoPlay = false) => {
     if (!deckBAudioRef.current) return;
 
+    const audioUrl = song.audioUrl || song.url;
+    if (!audioUrl) {
+      console.error('No audio URL found for Deck B track:', song);
+      dispatch(setDeckBLoading(false));
+      return;
+    }
+
     const loadGen = ++deckBLoadGenRef.current;
     console.log('Loading track to Deck B:', song.title, autoPlay ? '(autoPlay)' : '');
+    deckBTrackRef.current = song;
+    deckBPlayingRef.current = false;
     dispatch(setDeckBLoading(true));
     dispatch(setDeckBTrack(song));
 
     try {
-      // Set the audio source
-      const audioUrl = song.audioUrl || song.url;
+      // Stop any previous playback & clear loop flag cleanly before switching source
+      deckBAudioRef.current.pause();
+      deckBAudioRef.current.currentTime = 0;
+      deckBAudioRef.current.dataset.isLooping = 'false';
+
       console.log('Deck B audio URL:', audioUrl);
-
-      if (!audioUrl) {
-        console.error('No audio URL found for Deck B track:', song);
-        dispatch(setDeckBLoading(false));
-        return;
-      }
-
       deckBAudioRef.current.src = audioUrl;
 
       // Initialize Web Audio immediately (CORS enabled)
@@ -1097,93 +1150,96 @@ export const useMusicPlayer = () => {
   }, [dispatch, initializeWebAudioForDeckB]);
 
   const playDeckB = useCallback(async () => {
-    console.log('playDeckB called');
-    console.log('deckBAudioRef.current:', deckBAudioRef.current);
-    console.log('musicPlayerState.deckB.currentTrack:', musicPlayerState.deckB.currentTrack);
-    console.log('deckBAudioRef.current?.src:', deckBAudioRef.current?.src);
-    console.log('deckBAudioRef.current?.readyState:', deckBAudioRef.current?.readyState);
+    const audio = deckBAudioRef.current;
+    const track = deckBTrackRef.current;
 
-    if (!deckBAudioRef.current || !musicPlayerState.deckB.currentTrack) {
+    if (!audio || (!track && !audio.src)) {
       console.warn('Cannot play Deck B - missing audio ref or track');
       return;
     }
 
-    // Check if audio source is valid
-    if (!deckBAudioRef.current.src || deckBAudioRef.current.src === '') {
+    if (!audio.src || audio.src === '') {
       console.error('Cannot play Deck B - no audio source set');
       return;
     }
 
-    // If audio is not ready, try to load it first
-    if (deckBAudioRef.current.readyState < 2) {
-      console.warn('Deck B audio not ready (readyState:', deckBAudioRef.current.readyState, '), trying to load...');
+    if (audio.readyState < 2) {
+      console.warn('Deck B audio not ready (readyState:', audio.readyState, '), trying to load...');
       try {
-        deckBAudioRef.current.load();
-        console.log('Called load() on Deck B audio element');
+        audio.load();
       } catch (error) {
         console.error('Error calling load() on Deck B:', error);
       }
-
-      // For now, try to play anyway (some browsers allow this)
-      console.log('Attempting to play Deck B even though not fully ready...');
     }
 
     try {
       if (audioContextRef.current?.state === 'suspended') {
         await audioContextRef.current.resume();
       }
-      // Make sure we're not already playing
-      if (!deckBAudioRef.current.paused) {
-        console.log('Deck B already playing, pausing first');
-        deckBAudioRef.current.pause();
+      applyDeckGains();
+
+      if (!audio.paused) {
+        deckBPlayingRef.current = true;
+        dispatch(setDeckBPlaying(true));
+        return;
       }
 
-      console.log('Attempting to play Deck B audio...');
-      const playPromise = deckBAudioRef.current.play();
+      const playPromise = audio.play();
 
       if (playPromise !== undefined) {
         await playPromise;
+        deckBPlayingRef.current = true;
         dispatch(setDeckBPlaying(true));
-        console.log('▶️ Deck B playing:', musicPlayerState.deckB.currentTrack.title);
+        console.log('▶️ Deck B playing:', track?.title || audio.src);
       }
     } catch (error) {
       console.error('Error playing Deck B:', error);
+      deckBPlayingRef.current = false;
       dispatch(setDeckBPlaying(false));
     }
-  }, [dispatch, musicPlayerState.deckB.currentTrack]);
+  }, [dispatch, applyDeckGains]);
 
   const pauseDeckB = useCallback(() => {
-    if (deckBAudioRef.current && musicPlayerState.deckB.currentTrack) {
-      deckBAudioRef.current.pause();
+    const audio = deckBAudioRef.current;
+    if (audio) {
+      audio.pause();
+      deckBPlayingRef.current = false;
       dispatch(setDeckBPlaying(false));
-      console.log('⏸️ Deck B paused:', musicPlayerState.deckB.currentTrack.title);
+      if (deckBTrackRef.current) {
+        console.log('⏸️ Deck B paused:', deckBTrackRef.current.title);
+      }
     }
-  }, [dispatch, musicPlayerState.deckB.currentTrack]);
+  }, [dispatch]);
 
   const stopDeckB = useCallback(() => {
-    if (deckBAudioRef.current && musicPlayerState.deckB.currentTrack) {
-      deckBAudioRef.current.pause();
-      deckBAudioRef.current.currentTime = 0;
+    const audio = deckBAudioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      deckBPlayingRef.current = false;
       dispatch(setDeckBPlaying(false));
       dispatch(setDeckBPosition(0));
-      console.log('⏹️ Deck B stopped:', musicPlayerState.deckB.currentTrack.title);
+      if (deckBTrackRef.current) {
+        console.log('⏹️ Deck B stopped:', deckBTrackRef.current.title);
+      }
     }
-  }, [dispatch, musicPlayerState.deckB.currentTrack]);
+  }, [dispatch]);
 
   const toggleDeckB = useCallback(() => {
     // Check if audio element exists and is in sync with state
-    if (!deckBAudioRef.current && musicPlayerState.deckB.currentTrack) {
+    if (!deckBAudioRef.current && deckBTrackRef.current) {
       console.warn('❌ Audio element for Deck B not found but track exists - resetting state');
+      deckBPlayingRef.current = false;
       dispatch(setDeckBPlaying(false));
       return;
     }
 
-    if (musicPlayerState.deckB.isPlaying) {
+    if (deckBPlayingRef.current || (deckBAudioRef.current && !deckBAudioRef.current.paused)) {
       pauseDeckB();
     } else {
-      playDeckB();
+      void playDeckB();
     }
-  }, [musicPlayerState.deckB.isPlaying, musicPlayerState.deckB.currentTrack, playDeckB, pauseDeckB, dispatch]);
+  }, [playDeckB, pauseDeckB, dispatch]);
 
   // Volume controls (unified Web Audio gain staging with HTML5 fallback)
   const updateDeckAVolume = useCallback((volume: number) => {
@@ -2196,6 +2252,7 @@ export const useMusicPlayer = () => {
       refreshAudioDevices: async () => [] as AudioOutputDeviceInfo[],
       maxOutputChannels: 2,
       audioRoutingError: null as string | null,
+      setTalkoverDuck: () => {},
     };
   }
 
@@ -2304,6 +2361,7 @@ export const useMusicPlayer = () => {
     refreshAudioDevices,
     maxOutputChannels,
     audioRoutingError,
+    setTalkoverDuck,
 
     // Debug/utility functions
     resetLoadingStates,

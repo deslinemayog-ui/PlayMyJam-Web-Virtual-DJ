@@ -75,6 +75,49 @@ export function extractSongRequestQuery(comment: string): string | null {
   return cleaned;
 }
 
+/**
+ * Explicit slash command for VIP Custom AI Song creation (0ms, zero LLM cost):
+ * e.g. "/aisong Zimdancehall birthday song for Jossy in Harare" or "/make Amapiano song for Tino"
+ */
+export function extractExplicitAISongPrompt(comment: string): string | null {
+  const trimmed = (comment || '').trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^\/(aisong|make|create|ai)\s+(.+)$/i);
+  if (!match?.[2]) return null;
+  const cleaned = match[2].trim();
+  return cleaned.length >= 4 ? cleaned : null;
+}
+
+/**
+ * Fast local pre-filter so normal chat ("hi", "nice mix", "watching from Harare")
+ * NEVER wastes an AI intent-classification API call. Only returns true when the comment
+ * contains English or Shona song-request or custom-AI-song cues.
+ */
+export function looksLikeNaturalSongRequest(comment: string): boolean {
+  const trimmed = (comment || '').trim();
+  if (trimmed.length < 6 || trimmed.length > 240) return false;
+  if (trimmed.startsWith('/')) return false;
+
+  const lower = trimmed.toLowerCase();
+  // Questions asking what's currently playing are Q&A, not song requests
+  if (/\b(what song|which song|song name|track name|track id|ngoma ipi|rwiyo rupi)\b/.test(lower)) {
+    return false;
+  }
+
+  return (
+    /\b(play|drop|spin|queue|request|put on|throw on|hit us with|can we hear|let'?s hear|next song|next track)\b/.test(
+      lower
+    ) ||
+    /\b(tamba|tidzire|tiridzire|ridza|ndirikuda|ndinoda|tiise|isa ngoma|ngoma ya|rwiyo rwa|gadzira ngoma|gadzira rwiyo)\b/.test(
+      lower
+    ) ||
+    /\b(make (me |us |a )?|create (me |us |a )?|generate (a )?|compose|write (me |a )?)(.*)(song|track|beat|anthem|jam|ngoma|rwiyo)\b/.test(
+      lower
+    ) ||
+    /\b(ai song|custom song|birthday song|shoutout song)\b/.test(lower)
+  );
+}
+
 function getMeaningfulTokens(normalized: string): string[] {
   const all = normalized.split(' ').filter((t) => t.length > 0);
   const filtered = all.filter((t) => !FILLER_WORDS.has(t));

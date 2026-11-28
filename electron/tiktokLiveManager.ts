@@ -197,6 +197,19 @@ export class TikTokLiveManager {
         });
       });
 
+      // Viewer joined the live room
+      conn.on(WebcastEvent.MEMBER, (data) => {
+        const user = data.user;
+        this.emit('tiktok:member', {
+          id: `member-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          userId: String(user?.id ?? ''),
+          uniqueId: user?.displayId || 'viewer',
+          nickname: user?.nickname || user?.displayId || 'TikTok Viewer',
+          profilePictureUrl: getAvatarUrl(user),
+          timestamp: Date.now(),
+        });
+      });
+
       // Viewer count updates
       conn.on(WebcastEvent.ROOM_USER, (data) => {
         this.emit('tiktok:roomStats', {
